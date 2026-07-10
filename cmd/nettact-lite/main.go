@@ -24,6 +24,7 @@ import (
 	"github.com/nettact/server-core/incident"
 	"github.com/nettact/server-core/ingest"
 	"github.com/nettact/server-core/inventory"
+	"github.com/nettact/server-core/metrics"
 	"github.com/nettact/server-core/notification"
 	"github.com/nettact/server-core/registry"
 	"github.com/nettact/server-core/rules"
@@ -39,6 +40,9 @@ func main() {
 	adminUser := flag.String("admin-user", "", "bootstrap admin username (first run only)")
 	adminPass := flag.String("admin-pass", "", "bootstrap admin password (first run only)")
 	maxAgents := flag.Int("max-agents", 3, "max enrolled agents (0 = unlimited)")
+	retainRawDays := flag.Int("retain-raw-days", 14, "raw sample retention (days)")
+	retain1mDays := flag.Int("retain-1m-days", 90, "1-minute rollup retention (days)")
+	retain1hDays := flag.Int("retain-1h-days", 730, "1-hour rollup retention (days); 1-day rollups kept forever")
 	flag.Parse()
 
 	db, err := store.Open(*dbPath)
@@ -66,12 +70,13 @@ func main() {
 	}
 	auditSvc := audit.New(db)
 	invSvc := inventory.New(db)
+	metricsStore := metrics.New(db)
 	bus := eventbus.New()
-	ing := ingest.New(db, bus)
+	ing := ingest.New(db, bus, metricsStore)
 
 	// Detection pipeline: ingest → rules → alerts → incidents → notifications.
 	alertSvc := alert.New(db, bus)
-	rulesSvc := rules.New(db, alertSvc)
+	rulesSvc := rules.New(db, alertSvc, metricsStore)
 	if err := rulesSvc.SeedDefaults(ctx, site.DefaultSiteID); err != nil {
 		log.Printf("seed default rules: %v", err)
 	}
@@ -92,10 +97,37 @@ func main() {
 		}()
 	})
 
+	// Downsampling + tiered retention jobs (long-term history stays bounded).
+	retCfg := metrics.RetentionConfig{
+		RawSeconds: int64(*retainRawDays) * 86400,
+		M1Seconds:  int64(*retain1mDays) * 86400,
+		H1Seconds:  int64(*retain1hDays) * 86400,
+		D1Seconds:  0, // 1-day rollups kept forever
+	}
+	go func() {
+		t := time.NewTicker(time.Minute)
+		defer t.Stop()
+		for range t.C {
+			if err := metricsStore.Rollup(context.Background()); err != nil {
+				log.Printf("rollup: %v", err)
+			}
+		}
+	}()
+	go func() {
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for range t.C {
+			if err := metricsStore.Retention(context.Background(), retCfg); err != nil {
+				log.Printf("retention: %v", err)
+			}
+		}
+	}()
+
 	handler := api.Router(api.Deps{
 		Identity:     idSvc,
 		Registry:     reg,
 		Ingest:       ing,
+		Metrics:      metricsStore,
 		Config:       cfg,
 		Site:         siteSvc,
 		Inventory:    invSvc,
