@@ -21,6 +21,7 @@ import (
 	"github.com/nettact/server-core/eventbus"
 	"github.com/nettact/server-core/identity"
 	"github.com/nettact/server-core/ingest"
+	"github.com/nettact/server-core/inventory"
 	"github.com/nettact/server-core/registry"
 	"github.com/nettact/server-core/site"
 	"github.com/nettact/server-core/store"
@@ -59,6 +60,7 @@ func main() {
 		log.Printf("seed default targets: %v", err)
 	}
 	auditSvc := audit.New(db)
+	invSvc := inventory.New(db)
 	bus := eventbus.New()
 	ing := ingest.New(db, bus)
 
@@ -68,6 +70,7 @@ func main() {
 		Ingest:       ing,
 		Config:       cfg,
 		Site:         siteSvc,
+		Inventory:    invSvc,
 		Audit:        auditSvc,
 		Dev:          *dev,
 		SecureCookie: !*dev,
