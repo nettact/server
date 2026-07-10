@@ -39,7 +39,7 @@ func main() {
 	dev := flag.Bool("dev", false, "dev mode: open CORS for the Vite origin, non-Secure cookie")
 	adminUser := flag.String("admin-user", "", "bootstrap admin username (first run only)")
 	adminPass := flag.String("admin-pass", "", "bootstrap admin password (first run only)")
-	maxAgents := flag.Int("max-agents", 3, "max enrolled agents (0 = unlimited)")
+	maxAgents := flag.Int("max-agents", 50, "max enrolled agents (0 = unlimited)")
 	retainRawDays := flag.Int("retain-raw-days", 14, "raw sample retention (days)")
 	retain1mDays := flag.Int("retain-1m-days", 90, "1-minute rollup retention (days)")
 	retain1hDays := flag.Int("retain-1h-days", 730, "1-hour rollup retention (days); 1-day rollups kept forever")
@@ -119,6 +119,21 @@ func main() {
 		for range t.C {
 			if err := metricsStore.Retention(context.Background(), retCfg); err != nil {
 				log.Printf("retention: %v", err)
+			}
+		}
+	}()
+
+	// Offline sweeper: flip agents to offline (and record history) when they stop
+	// checking in, so the online count and status history stay truthful.
+	const offlineAfter = 90 * time.Second
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		for range t.C {
+			if n, err := reg.SweepStale(context.Background(), offlineAfter); err != nil {
+				log.Printf("offline sweep: %v", err)
+			} else if n > 0 {
+				log.Printf("offline sweep: %d agent(s) marked offline", n)
 			}
 		}
 	}()
