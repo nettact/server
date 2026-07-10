@@ -77,9 +77,6 @@ func main() {
 	// Detection pipeline: ingest → rules → alerts → incidents → notifications.
 	alertSvc := alert.New(db, bus)
 	rulesSvc := rules.New(db, alertSvc, metricsStore)
-	if err := rulesSvc.SeedDefaults(ctx, site.DefaultSiteID); err != nil {
-		log.Printf("seed default rules: %v", err)
-	}
 	notifSvc := notification.New(db)
 	incidentSvc := incident.New(db, bus, notifSvc)
 	incidentSvc.Wire()
