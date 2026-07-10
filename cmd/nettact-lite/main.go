@@ -15,16 +15,21 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nettact/server-core/alert"
 	"github.com/nettact/server-core/api"
 	"github.com/nettact/server-core/audit"
 	"github.com/nettact/server-core/config"
 	"github.com/nettact/server-core/eventbus"
 	"github.com/nettact/server-core/identity"
+	"github.com/nettact/server-core/incident"
 	"github.com/nettact/server-core/ingest"
 	"github.com/nettact/server-core/inventory"
+	"github.com/nettact/server-core/notification"
 	"github.com/nettact/server-core/registry"
+	"github.com/nettact/server-core/rules"
 	"github.com/nettact/server-core/site"
 	"github.com/nettact/server-core/store"
+	"github.com/nettact/server-lite/internal/webui"
 )
 
 func main() {
@@ -64,6 +69,29 @@ func main() {
 	bus := eventbus.New()
 	ing := ingest.New(db, bus)
 
+	// Detection pipeline: ingest → rules → alerts → incidents → notifications.
+	alertSvc := alert.New(db, bus)
+	rulesSvc := rules.New(db, alertSvc)
+	if err := rulesSvc.SeedDefaults(ctx, site.DefaultSiteID); err != nil {
+		log.Printf("seed default rules: %v", err)
+	}
+	notifSvc := notification.New(db)
+	incidentSvc := incident.New(db, bus, notifSvc)
+	incidentSvc.Wire()
+
+	// Rule worker: evaluate on each telemetry ingest (off the request path).
+	bus.Subscribe(eventbus.TopicTelemetryIngested, func(m eventbus.Message) {
+		ev, ok := m.Payload.(eventbus.TelemetryIngested)
+		if !ok {
+			return
+		}
+		go func() {
+			if err := rulesSvc.EvaluateAgent(context.Background(), ev.AgentID, ev.SiteID); err != nil {
+				log.Printf("rule eval (%s): %v", ev.AgentID, err)
+			}
+		}()
+	})
+
 	handler := api.Router(api.Deps{
 		Identity:     idSvc,
 		Registry:     reg,
@@ -71,7 +99,12 @@ func main() {
 		Config:       cfg,
 		Site:         siteSvc,
 		Inventory:    invSvc,
+		Rules:        rulesSvc,
+		Alert:        alertSvc,
+		Incident:     incidentSvc,
+		Notification: notifSvc,
 		Audit:        auditSvc,
+		SPA:          webui.Handler(),
 		Dev:          *dev,
 		SecureCookie: !*dev,
 	})
