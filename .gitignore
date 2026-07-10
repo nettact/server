@@ -1,0 +1,18 @@
+# Go
+*.exe
+*.test
+*.out
+/bin/
+
+# Local SQLite database + WAL
+*.db
+*.db-wal
+*.db-shm
+
+# Embedded SPA copied in from the web-console repo at build time (M4)
+internal/webui/dist/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
