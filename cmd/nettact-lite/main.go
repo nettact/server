@@ -20,6 +20,7 @@ import (
 	"github.com/nettact/server-core/audit"
 	"github.com/nettact/server-core/config"
 	"github.com/nettact/server-core/eventbus"
+	"github.com/nettact/server-core/hostlive"
 	"github.com/nettact/server-core/identity"
 	"github.com/nettact/server-core/incident"
 	"github.com/nettact/server-core/ingest"
@@ -73,6 +74,8 @@ func main() {
 	metricsStore := metrics.New(db)
 	bus := eventbus.New()
 	ing := ingest.New(db, bus, metricsStore)
+	// In-memory store for ephemeral, pull-on-demand host snapshots (never persisted).
+	hostLive := hostlive.New()
 
 	// Detection pipeline: ingest → rules → alerts → incidents → notifications.
 	alertSvc := alert.New(db, bus)
@@ -148,6 +151,7 @@ func main() {
 		Incident:     incidentSvc,
 		Notification: notifSvc,
 		Audit:        auditSvc,
+		HostLive:     hostLive,
 		SPA:          webui.Handler(),
 		Dev:          *dev,
 		SecureCookie: !*dev,
