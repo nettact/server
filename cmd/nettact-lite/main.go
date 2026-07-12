@@ -29,6 +29,7 @@ import (
 	"github.com/nettact/server-core/notification"
 	"github.com/nettact/server-core/registry"
 	"github.com/nettact/server-core/rules"
+	"github.com/nettact/server-core/settings"
 	"github.com/nettact/server-core/site"
 	"github.com/nettact/server-core/store"
 	"github.com/nettact/server-lite/internal/webui"
@@ -81,7 +82,8 @@ func main() {
 	alertSvc := alert.New(db, bus)
 	rulesSvc := rules.New(db, alertSvc, metricsStore)
 	notifSvc := notification.New(db)
-	incidentSvc := incident.New(db, bus, notifSvc)
+	settingsSvc := settings.New(db)
+	incidentSvc := incident.New(db, bus, notifSvc, settingsSvc)
 	incidentSvc.Wire()
 
 	// Rule worker: evaluate on each telemetry ingest (off the request path).
@@ -150,6 +152,7 @@ func main() {
 		Alert:        alertSvc,
 		Incident:     incidentSvc,
 		Notification: notifSvc,
+		Settings:     settingsSvc,
 		Audit:        auditSvc,
 		HostLive:     hostLive,
 		SPA:          webui.Handler(),
