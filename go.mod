@@ -5,6 +5,7 @@ go 1.25
 require github.com/nettact/server-core v0.0.0-00010101000000-000000000000
 
 require (
+	github.com/coder/websocket v1.8.14 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-chi/chi/v5 v5.2.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
