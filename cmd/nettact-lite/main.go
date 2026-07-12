@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -42,8 +43,11 @@ func main() {
 	adminUser := flag.String("admin-user", "", "bootstrap admin username (first run only)")
 	adminPass := flag.String("admin-pass", "", "bootstrap admin password (first run only)")
 	maxAgents := flag.Int("max-agents", 50, "max enrolled agents (0 = unlimited)")
-	retainRawDays := flag.Int("retain-raw-days", 14, "raw sample retention (days)")
-	retain1mDays := flag.Int("retain-1m-days", 90, "1-minute rollup retention (days)")
+	// Raw only serves chart reads of ranges ≤2h (longer ranges read the rollups),
+	// so its default is days, not weeks — at 1s probe intervals every extra raw
+	// day is GBs of SQLite.
+	retainRawDays := flag.Int("retain-raw-days", 2, "raw sample retention (days)")
+	retain1mDays := flag.Int("retain-1m-days", 30, "1-minute rollup retention (days)")
 	retain1hDays := flag.Int("retain-1h-days", 730, "1-hour rollup retention (days); 1-day rollups kept forever")
 	flag.Parse()
 
@@ -86,17 +90,46 @@ func main() {
 	incidentSvc := incident.New(db, bus, notifSvc, settingsSvc)
 	incidentSvc.Wire()
 
-	// Rule worker: evaluate on each telemetry ingest (off the request path).
+	// Rule worker: evaluate on each telemetry ingest, coalesced per agent — one
+	// evaluation in flight per agent, and a burst of packets while it runs marks
+	// the agent dirty for exactly one re-run instead of spawning a goroutine per
+	// packet (at 50 agents × 1s probes those unbounded goroutines all pile onto
+	// the single write connection when they update alert state).
+	var evalMu sync.Mutex
+	evalRunning := map[string]bool{}
+	evalDirty := map[string]bool{}
+	kickEval := func(agentID, siteID string) {
+		evalMu.Lock()
+		if evalRunning[agentID] {
+			evalDirty[agentID] = true
+			evalMu.Unlock()
+			return
+		}
+		evalRunning[agentID] = true
+		evalMu.Unlock()
+		go func() {
+			for {
+				if err := rulesSvc.EvaluateAgent(context.Background(), agentID, siteID); err != nil {
+					log.Printf("rule eval (%s): %v", agentID, err)
+				}
+				evalMu.Lock()
+				if evalDirty[agentID] {
+					delete(evalDirty, agentID)
+					evalMu.Unlock()
+					continue
+				}
+				evalRunning[agentID] = false
+				evalMu.Unlock()
+				return
+			}
+		}()
+	}
 	bus.Subscribe(eventbus.TopicTelemetryIngested, func(m eventbus.Message) {
 		ev, ok := m.Payload.(eventbus.TelemetryIngested)
 		if !ok {
 			return
 		}
-		go func() {
-			if err := rulesSvc.EvaluateAgent(context.Background(), ev.AgentID, ev.SiteID); err != nil {
-				log.Printf("rule eval (%s): %v", ev.AgentID, err)
-			}
-		}()
+		kickEval(ev.AgentID, ev.SiteID)
 	})
 
 	// Downsampling + tiered retention jobs (long-term history stays bounded).
@@ -121,6 +154,11 @@ func main() {
 		for range t.C {
 			if err := metricsStore.Retention(context.Background(), retCfg); err != nil {
 				log.Printf("retention: %v", err)
+			}
+			// The agent WAL keeps at most 72h of unacked data, so week-old dedup
+			// rows can never legitimately replay.
+			if err := ing.PrunePackets(context.Background(), 7*24*time.Hour); err != nil {
+				log.Printf("prune packets: %v", err)
 			}
 		}
 	}()
