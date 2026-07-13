@@ -22,6 +22,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nettact/protocol/enroll"
+	"github.com/nettact/protocol/wire"
 	"github.com/nettact/server-core/agentws"
 	"github.com/nettact/server-core/alert"
 	"github.com/nettact/server-core/api"
@@ -96,10 +98,11 @@ type Server struct {
 	agentHub *agentws.Hub
 	workers  *workers
 
-	idSvc   *identity.Service
-	regSvc  *registry.Service
-	setSvc  *settings.Service
-	adminID string
+	idSvc    *identity.Service
+	regSvc   *registry.Service
+	setSvc   *settings.Service
+	auditSvc *audit.Service
+	adminID  string
 
 	login *loginTokens // nil unless Desktop != nil
 
@@ -222,6 +225,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		idSvc:    idSvc,
 		regSvc:   reg,
 		setSvc:   settingsSvc,
+		auditSvc: auditSvc,
 		adminID:  admin.ID,
 		errCh:    make(chan error, 1),
 	}
@@ -312,6 +316,27 @@ func (s *Server) Err() <-chan error { return s.errCh }
 // reaches a command line).
 func (s *Server) MintEnrollmentToken(ctx context.Context, note string) (string, error) {
 	return s.regSvc.CreateEnrollmentToken(ctx, site.DefaultSiteID, note, 5*time.Minute)
+}
+
+// EnrollAgent redeems an enrollment request directly against the registry — the
+// in-process equivalent of POST /api/v1/enroll, including the audit entry. The
+// desktop passes this as agentrt.Config.Enroller so its bundled agent enrolls
+// without an HTTP round-trip. Token redemption, quota, and signature checks all
+// run exactly as they do over HTTP.
+func (s *Server) EnrollAgent(ctx context.Context, req enroll.EnrollRequest) (enroll.EnrollResponse, error) {
+	resp, err := s.regSvc.Enroll(ctx, req)
+	if err != nil {
+		return enroll.EnrollResponse{}, err
+	}
+	s.auditSvc.Log(ctx, resp.AgentID, "agent.enroll", resp.SiteID, req.Hostname)
+	return resp, nil
+}
+
+// DialAgent attaches an in-process agent link to the embedded hub, bypassing the
+// loopback WebSocket entirely. It matches wire.Dialer; the desktop passes it as
+// agentrt.Config.Dialer so telemetry and config never leave the process.
+func (s *Server) DialAgent(ctx context.Context, token string) (wire.Conn, error) {
+	return s.agentHub.DialLocal(ctx, token)
 }
 
 // Shutdown stops the server in the one safe order: close hijacked agent
