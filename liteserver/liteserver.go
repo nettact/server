@@ -37,10 +37,12 @@ import (
 	"github.com/nettact/server-core/inventory"
 	"github.com/nettact/server-core/metrics"
 	"github.com/nettact/server-core/notification"
+	"github.com/nettact/server-core/opissue"
 	"github.com/nettact/server-core/registry"
 	"github.com/nettact/server-core/rules"
 	"github.com/nettact/server-core/settings"
 	"github.com/nettact/server-core/site"
+	"github.com/nettact/server-core/sse"
 	"github.com/nettact/server-core/store"
 	"github.com/nettact/server-lite/internal/webui"
 )
@@ -96,6 +98,7 @@ type Server struct {
 	baseURL string
 
 	agentHub *agentws.Hub
+	broker   *sse.Broker
 	workers  *workers
 
 	idSvc    *identity.Service
@@ -168,12 +171,22 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	metricsStore := metrics.New(db)
 	ing := ingest.New(db, bus, metricsStore)
 	hostLive := hostlive.New()
+	opSvc := opissue.New(db, bus)
+
+	// SSE broker fans live operational-issue changes out to connected consoles.
+	broker := sse.NewBroker()
+	bus.Subscribe(eventbus.TopicIssueChanged, func(m eventbus.Message) {
+		if ev, ok := m.Payload.(eventbus.IssueChanged); ok {
+			broker.Notify(ev.SiteID)
+		}
+	})
 
 	agentHub := agentws.New(agentws.Deps{
 		Registry: reg,
 		Ingest:   ing,
 		Config:   cfgSvc,
 		HostLive: hostLive,
+		OpIssue:  opSvc,
 		Bus:      bus,
 	})
 
@@ -210,6 +223,8 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		Settings:     settingsSvc,
 		Audit:        auditSvc,
 		HostLive:     hostLive,
+		OpIssue:      opSvc,
+		SSE:          broker,
 		AgentWS:      agentHub,
 		Bus:          bus,
 		SPA:          webui.Handler(),
@@ -221,6 +236,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		cfg:      cfg,
 		db:       db,
 		agentHub: agentHub,
+		broker:   broker,
 		workers:  w,
 		idSvc:    idSvc,
 		regSvc:   reg,
@@ -348,6 +364,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	var err error
 	s.shutdownOnce.Do(func() {
 		s.agentHub.CloseAll("server shutting down")
+		// Drop SSE subscribers so their handlers return and stop querying the DB;
+		// this must precede db.Close (below) and lets http.Shutdown finish promptly
+		// instead of waiting on long-lived event streams.
+		s.broker.Close()
 		if e := s.httpSrv.Shutdown(ctx); e != nil {
 			err = e
 		}

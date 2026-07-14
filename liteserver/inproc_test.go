@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/nettact/protocol"
-	"github.com/nettact/protocol/capability"
 	protoenroll "github.com/nettact/protocol/enroll"
+	"github.com/nettact/protocol/permission"
 	"github.com/nettact/protocol/telemetry"
 	"github.com/nettact/protocol/wire"
 )
@@ -46,7 +46,12 @@ func TestInProcessEnrollAndDial(t *testing.T) {
 		Hostname:        "desktop-host",
 		Platform:        "windows",
 		AgentVersion:    "test",
-		Capabilities:    []capability.Capability{capability.ProbeTCP},
+		Permissions: permission.PermissionReport{
+			Supported: []string{string(permission.ProbeTCP)},
+			Granted:   []string{string(permission.ProbeTCP)},
+			Effective: []string{string(permission.ProbeTCP)},
+			Source:    string(permission.SourceEnvironment),
+		},
 	}
 
 	resp, err := srv.EnrollAgent(ctx, req)
@@ -69,7 +74,12 @@ func TestInProcessEnrollAndDial(t *testing.T) {
 		Hostname:      "desktop-host",
 		Platform:      "windows",
 		AgentVersion:  "test",
-		Capabilities:  []string{string(capability.ProbeTCP)},
+		Permissions: permission.PermissionReport{
+			Supported: []string{string(permission.ProbeTCP)},
+			Granted:   []string{string(permission.ProbeTCP)},
+			Effective: []string{string(permission.ProbeTCP)},
+			Source:    string(permission.SourceEnvironment),
+		},
 	}}
 	if err := c.WriteFrame(ctx, hello); err != nil {
 		t.Fatalf("write hello: %v", err)
