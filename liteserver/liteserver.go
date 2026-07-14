@@ -162,7 +162,8 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 
 	reg := registry.New(db, cfg.MaxAgents)
 	bus := eventbus.New()
-	cfgSvc := config.New(db, reg, bus)
+	alertSvc := alert.New(db, bus)
+	cfgSvc := config.New(db, reg, bus, alertSvc)
 	if err := cfgSvc.SeedDefaults(ctx, site.DefaultSiteID); err != nil {
 		log.Printf("seed default targets: %v", err)
 	}
@@ -190,7 +191,6 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		Bus:      bus,
 	})
 
-	alertSvc := alert.New(db, bus)
 	rulesSvc := rules.New(db, alertSvc, metricsStore)
 	notifSvc := notification.New(db)
 	settingsSvc := settings.New(db)
