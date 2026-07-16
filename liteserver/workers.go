@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"github.com/nettact/server-core/agentws"
+	"github.com/nettact/server-core/alert"
 	"github.com/nettact/server-core/eventbus"
 	"github.com/nettact/server-core/identity"
+	"github.com/nettact/server-core/incidentops"
 	"github.com/nettact/server-core/ingest"
 	"github.com/nettact/server-core/metrics"
 	"github.com/nettact/server-core/registry"
@@ -91,14 +93,15 @@ func (w *workers) stop(ctx context.Context) bool {
 
 // deps bundles the services the periodic and event-driven workers need.
 type deps struct {
-	metrics  *metrics.Store
-	ingest   *ingest.Service
-	identity *identity.Service
-	registry *registry.Service
-	rules    *rules.Service
-	bus      *eventbus.Bus
-	hub      *agentws.Hub
-	ret      metrics.RetentionConfig
+	metrics     *metrics.Store
+	ingest      *ingest.Service
+	identity    *identity.Service
+	registry    *registry.Service
+	rules       *rules.Service
+	incidentops *incidentops.Service
+	bus         *eventbus.Bus
+	hub         *agentws.Hub
+	ret         metrics.RetentionConfig
 }
 
 func startWorkers(w *workers, d deps) {
@@ -135,6 +138,23 @@ func startWorkers(w *workers, d deps) {
 		if _, err := d.identity.PruneSessions(ctx); err != nil {
 			log.Printf("prune sessions: %v", err)
 		}
+		// Evidence retention: drop agent-collected snapshot detail and shared trace
+		// hop detail for incidents resolved past the retention window, marking them
+		// evidence_expired while preserving the incident/alert/evidence summaries.
+		if err := d.incidentops.Retention(ctx); err != nil {
+			log.Printf("incidentops retention: %v", err)
+		}
+	})
+
+	// Incident snapshot/trace maintenance on a short managed interval: finalize
+	// snapshots past their deadline, time out expired traces, close orphaned
+	// cohorts and rehydrate the eligible queued trace work. Idempotent and cheap
+	// when idle. Runs on the workers context/waitgroup, so shutdown waits for an
+	// in-flight tick and it never writes through a closed DB.
+	w.every(5*time.Second, func(ctx context.Context) {
+		if err := d.incidentops.Tick(ctx); err != nil {
+			log.Printf("incidentops tick: %v", err)
+		}
 	})
 
 	// Offline sweeper: a live WebSocket keeps an agent out of the sweep, so this
@@ -146,6 +166,53 @@ func startWorkers(w *workers, d deps) {
 			log.Printf("offline sweep: %v", err)
 		} else if n > 0 {
 			log.Printf("offline sweep: %d agent(s) marked offline", n)
+		}
+	})
+}
+
+// wireIncidentOps registers the incident snapshot + traceroute orchestration's
+// post-commit event subscriptions. The fault engine publishes these off its write
+// transaction, so the handlers run synchronously on the publisher's goroutine
+// (the coalesced rule-eval worker for telemetry-driven faults, or the HTTP
+// request goroutine for a configuration-driven termination) — never inside the
+// rule transaction and never on an unmanaged goroutine of our own. Each handler
+// opens its own DB transaction under the workers context, which is cancelled
+// before the DB is closed, so no handler writes through a closed DB.
+func wireIncidentOps(w *workers, bus *eventbus.Bus, io *incidentops.Service) {
+	if bus == nil || io == nil {
+		return
+	}
+	// Incident opened -> one collecting snapshot entry + IncidentSnapshotRequest
+	// dispatched to each distinct involved Agent.
+	bus.Subscribe(eventbus.TopicIncidentOpened, func(m eventbus.Message) {
+		ev, ok := m.Payload.(eventbus.IncidentEvent)
+		if !ok {
+			return
+		}
+		if err := io.OnIncidentOpened(w.ctx, ev); err != nil {
+			log.Printf("incidentops: incident-opened snapshot dispatch (%s): %v", ev.IncidentID, err)
+		}
+	})
+	// Evidence added -> single-flight traceroute trigger for the detecting Agent of
+	// an eligible network-availability fault.
+	bus.Subscribe(eventbus.TopicEvidenceAdded, func(m eventbus.Message) {
+		ev, ok := m.Payload.(eventbus.EvidenceAdded)
+		if !ok {
+			return
+		}
+		if err := io.OnEvidence(w.ctx, ev); err != nil {
+			log.Printf("incidentops: evidence-added trace trigger (%s): %v", ev.EvidenceID, err)
+		}
+	})
+	// Alert resolved -> deactivate the trace references it held and close any cohort
+	// whose active reference count fell to zero (the execution itself is untouched).
+	bus.Subscribe(eventbus.TopicAlertResolved, func(m eventbus.Message) {
+		ev, ok := m.Payload.(alert.Raised)
+		if !ok {
+			return
+		}
+		if err := io.OnAlertResolved(w.ctx, ev.ID); err != nil {
+			log.Printf("incidentops: alert-resolved refs (%s): %v", ev.ID, err)
 		}
 	})
 }

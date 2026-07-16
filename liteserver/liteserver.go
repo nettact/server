@@ -33,6 +33,7 @@ import (
 	"github.com/nettact/server-core/hostlive"
 	"github.com/nettact/server-core/identity"
 	"github.com/nettact/server-core/incident"
+	"github.com/nettact/server-core/incidentops"
 	"github.com/nettact/server-core/ingest"
 	"github.com/nettact/server-core/inventory"
 	"github.com/nettact/server-core/metrics"
@@ -162,17 +163,37 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 
 	reg := registry.New(db, cfg.MaxAgents)
 	bus := eventbus.New()
-	alertSvc := alert.New(db, bus)
-	cfgSvc := config.New(db, reg, bus, alertSvc)
+
+	// Leaf services the fault engine and orchestration build on.
+	metricsStore := metrics.New(db)
+	settingsSvc := settings.New(db)
+	notifSvc := notification.New(db)
+	alertSvc := alert.New(db)
+
+	// Incident snapshot + traceroute orchestration. Constructed before the fault
+	// engine (which uses it as the synchronous incident-base snapshot writer) and
+	// before the hub (whose Pusher it becomes); its Pusher is injected once the hub
+	// exists, below, closing the construction cycle without an import cycle.
+	incidentOps := incidentops.New(db, metricsStore, settingsSvc, bus)
+
+	// Fault engine: evaluates group rules, maintains alerts/incidents, writes the
+	// immutable incident base snapshot inside its open transaction (via incidentOps),
+	// dispatches notifications, and publishes lifecycle events post-commit.
+	rulesSvc := rules.New(db, metricsStore, notifSvc, settingsSvc, bus, incidentOps)
+
+	// Config force-resolves alerts of removed targets/rules through the fault engine
+	// (AlertTerminator), so it takes rulesSvc rather than the alert read model.
+	cfgSvc := config.New(db, reg, bus, rulesSvc)
 	if err := cfgSvc.SeedDefaults(ctx, site.DefaultSiteID); err != nil {
 		log.Printf("seed default targets: %v", err)
 	}
+
 	auditSvc := audit.New(db)
 	invSvc := inventory.New(db)
-	metricsStore := metrics.New(db)
 	ing := ingest.New(db, bus, metricsStore)
 	hostLive := hostlive.New()
 	opSvc := opissue.New(db, bus)
+	incidentSvc := incident.New(db)
 
 	// SSE broker fans live operational-issue changes out to connected consoles.
 	broker := sse.NewBroker()
@@ -183,30 +204,43 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	})
 
 	agentHub := agentws.New(agentws.Deps{
-		Registry: reg,
-		Ingest:   ing,
-		Config:   cfgSvc,
-		HostLive: hostLive,
-		OpIssue:  opSvc,
-		Bus:      bus,
+		Registry:    reg,
+		Ingest:      ing,
+		Config:      cfgSvc,
+		HostLive:    hostLive,
+		OpIssue:     opSvc,
+		Bus:         bus,
+		IncidentOps: incidentOps,
 	})
-
-	rulesSvc := rules.New(db, alertSvc, metricsStore)
-	notifSvc := notification.New(db)
-	settingsSvc := settings.New(db)
-	incidentSvc := incident.New(db, bus, notifSvc, settingsSvc)
-	incidentSvc.Wire()
+	// The hub is the agent-WebSocket Pusher for incident-snapshot / trace requests;
+	// inject it now that it exists (before serving, so no lock is needed) so the
+	// orchestration's dispatch and reconnect re-push reach live sessions.
+	incidentOps.SetPusher(agentHub)
 
 	w := newWorkers()
+	// Post-commit orchestration subscriptions (incident opened / evidence added /
+	// alert resolved). Registered before recovery and before serving so no early
+	// lifecycle event is missed; the fault engine publishes these off its write
+	// transaction, so the handlers never run inside it.
+	wireIncidentOps(w, bus, incidentOps)
+
+	// Recovery before listening: finalize snapshots/traces whose deadline elapsed
+	// while the server was down, close cohorts orphaned by refs/alerts that are no
+	// longer active, and rehydrate the still-eligible queued trace work.
+	if err := incidentOps.Recover(ctx); err != nil {
+		log.Printf("incidentops recover: %v", err)
+	}
+
 	startWorkers(w, deps{
-		metrics:  metricsStore,
-		ingest:   ing,
-		identity: idSvc,
-		registry: reg,
-		rules:    rulesSvc,
-		bus:      bus,
-		hub:      agentHub,
-		ret:      cfg.Retention,
+		metrics:     metricsStore,
+		ingest:      ing,
+		identity:    idSvc,
+		registry:    reg,
+		rules:       rulesSvc,
+		incidentops: incidentOps,
+		bus:         bus,
+		hub:         agentHub,
+		ret:         cfg.Retention,
 	})
 
 	handler := api.Router(api.Deps{
@@ -219,6 +253,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		Rules:        rulesSvc,
 		Alert:        alertSvc,
 		Incident:     incidentSvc,
+		IncidentOps:  incidentOps,
 		Notification: notifSvc,
 		Settings:     settingsSvc,
 		Audit:        auditSvc,
