@@ -14,7 +14,6 @@ import (
 	"github.com/nettact/server-core/ingest"
 	"github.com/nettact/server-core/metrics"
 	"github.com/nettact/server-core/registry"
-	"github.com/nettact/server-core/rules"
 )
 
 // workers owns every background goroutine on one context so shutdown is a single
@@ -97,7 +96,6 @@ type deps struct {
 	ingest      *ingest.Service
 	identity    *identity.Service
 	registry    *registry.Service
-	rules       *rules.Service
 	incidentops *incidentops.Service
 	bus         *eventbus.Bus
 	hub         *agentws.Hub
@@ -105,17 +103,6 @@ type deps struct {
 }
 
 func startWorkers(w *workers, d deps) {
-	// Rule evaluation, coalesced per agent (see ruleEval), driven off the ingest
-	// event. Wired before the periodic jobs so no early telemetry is missed.
-	re := newRuleEval(w, d.rules)
-	d.bus.Subscribe(eventbus.TopicTelemetryIngested, func(m eventbus.Message) {
-		ev, ok := m.Payload.(eventbus.TelemetryIngested)
-		if !ok {
-			return
-		}
-		re.kick(ev.AgentID, ev.SiteID)
-	})
-
 	// Downsampling: raw → 1m/1h/1d rollups.
 	w.every(time.Minute, func(ctx context.Context) {
 		if err := d.metrics.Rollup(ctx); err != nil {
@@ -215,58 +202,4 @@ func wireIncidentOps(w *workers, bus *eventbus.Bus, io *incidentops.Service) {
 			log.Printf("incidentops: alert-resolved refs (%s): %v", ev.ID, err)
 		}
 	})
-}
-
-// ruleEval coalesces rule evaluation per agent: one evaluation in flight per
-// agent, and a burst of packets while it runs marks the agent dirty for exactly
-// one re-run instead of spawning a goroutine per packet. Its goroutines are
-// tracked in the shared workers.wg and run on the workers context, so shutdown
-// waits for an in-flight evaluation and no eval writes through a closed DB.
-type ruleEval struct {
-	w     *workers
-	rules *rules.Service
-
-	mu      sync.Mutex
-	running map[string]bool
-	dirty   map[string]bool
-}
-
-func newRuleEval(w *workers, r *rules.Service) *ruleEval {
-	return &ruleEval{w: w, rules: r, running: map[string]bool{}, dirty: map[string]bool{}}
-}
-
-func (re *ruleEval) kick(agentID, siteID string) {
-	re.mu.Lock()
-	if re.running[agentID] {
-		re.dirty[agentID] = true
-		re.mu.Unlock()
-		return
-	}
-	// Reserve the wg slot under re.mu together with the running flag. add() gates
-	// on workers.stopping, so a late ingest that fans out during shutdown can
-	// never Add after stop() began its wg.Wait — it is dropped here instead.
-	if !re.w.add() {
-		re.mu.Unlock()
-		return
-	}
-	re.running[agentID] = true
-	re.mu.Unlock()
-
-	go func() {
-		defer re.w.wg.Done()
-		for {
-			if err := re.rules.EvaluateAgent(re.w.ctx, agentID, siteID); err != nil {
-				log.Printf("rule eval (%s): %v", agentID, err)
-			}
-			re.mu.Lock()
-			if re.dirty[agentID] && re.w.ctx.Err() == nil {
-				delete(re.dirty, agentID)
-				re.mu.Unlock()
-				continue
-			}
-			re.running[agentID] = false
-			re.mu.Unlock()
-			return
-		}
-	}()
 }

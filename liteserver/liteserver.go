@@ -14,6 +14,7 @@ package liteserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -45,6 +46,7 @@ import (
 	"github.com/nettact/server-core/site"
 	"github.com/nettact/server-core/sse"
 	"github.com/nettact/server-core/store"
+	"github.com/nettact/server-core/targetstatus"
 	"github.com/nettact/server-lite/internal/webui"
 )
 
@@ -161,8 +163,8 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("bootstrap admin: %w", err)
 	}
 
-	reg := registry.New(db, cfg.MaxAgents)
 	bus := eventbus.New()
+	reg := registry.New(db, cfg.MaxAgents, bus)
 
 	// Leaf services the fault engine and orchestration build on.
 	metricsStore := metrics.New(db)
@@ -190,17 +192,49 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 
 	auditSvc := audit.New(db)
 	invSvc := inventory.New(db)
-	ing := ingest.New(db, bus, metricsStore)
+	// Ingest evaluates rules inside its own sample transaction (atomic telemetry +
+	// rule-state visibility), so it takes the fault engine as its Evaluator.
+	ing := ingest.New(db, bus, metricsStore, rulesSvc)
 	hostLive := hostlive.New()
 	opSvc := opissue.New(db, bus)
 	incidentSvc := incident.New(db)
+	// Authoritative current target-status aggregation (read-time; owns no state).
+	tgtStatusSvc := targetstatus.New(db)
 
-	// SSE broker fans live operational-issue changes out to connected consoles.
+	// SSE broker fans live changes out to connected consoles. It multiplexes two
+	// streams per site on one connection: authoritative "issues" snapshots and
+	// precise "target.status.changed" events.
 	broker := sse.NewBroker()
 	bus.Subscribe(eventbus.TopicIssueChanged, func(m eventbus.Message) {
 		if ev, ok := m.Payload.(eventbus.IssueChanged); ok {
-			broker.Notify(ev.SiteID)
+			broker.Notify(ev.SiteID, sse.Event{Name: sse.EventIssues})
 		}
+	})
+	// Precise target-status change: carry the affected site + target ids so the
+	// client coalesces a batch refresh. An empty target-id set means the whole site
+	// changed and the client fully refreshes.
+	bus.Subscribe(eventbus.TopicTargetStatusChanged, func(m eventbus.Message) {
+		ev, ok := m.Payload.(eventbus.TargetStatusChanged)
+		if !ok {
+			return
+		}
+		broker.Notify(ev.SiteID, sse.Event{
+			Name: sse.EventTargetStatusChanged,
+			Data: targetStatusEventData(ev.SiteID, ev.TargetIDs),
+		})
+	})
+	// Agent liveness flips affect every target in the agent's scope, so a bridge
+	// fans it out to a site-wide status refresh (empty target-id set). This is the
+	// only place an agent online↔offline transition reaches target status.
+	bus.Subscribe(eventbus.TopicAgentLivenessChanged, func(m eventbus.Message) {
+		ev, ok := m.Payload.(eventbus.AgentLivenessChanged)
+		if !ok {
+			return
+		}
+		broker.Notify(ev.SiteID, sse.Event{
+			Name: sse.EventTargetStatusChanged,
+			Data: targetStatusEventData(ev.SiteID, nil),
+		})
 	})
 
 	agentHub := agentws.New(agentws.Deps{
@@ -236,7 +270,6 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		ingest:      ing,
 		identity:    idSvc,
 		registry:    reg,
-		rules:       rulesSvc,
 		incidentops: incidentOps,
 		bus:         bus,
 		hub:         agentHub,
@@ -259,6 +292,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		Audit:        auditSvc,
 		HostLive:     hostLive,
 		OpIssue:      opSvc,
+		TargetStatus: tgtStatusSvc,
 		SSE:          broker,
 		AgentWS:      agentHub,
 		Bus:          bus,
@@ -418,6 +452,20 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		}
 	})
 	return err
+}
+
+// targetStatusEventData marshals the "target.status.changed" SSE payload: the
+// affected site and target ids. A nil/empty id slice is emitted as an empty JSON
+// array, which the client reads as "the whole site changed → full refresh".
+func targetStatusEventData(siteID string, targetIDs []string) []byte {
+	if targetIDs == nil {
+		targetIDs = []string{}
+	}
+	data, err := json.Marshal(map[string]any{"site_id": siteID, "target_ids": targetIDs})
+	if err != nil {
+		return []byte(`{"site_id":"","target_ids":[]}`)
+	}
+	return data
 }
 
 // validate enforces the config invariants. In desktop mode it structurally
