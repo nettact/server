@@ -8,6 +8,7 @@ import (
 
 	"github.com/nettact/server-core/agentws"
 	"github.com/nettact/server-core/alert"
+	"github.com/nettact/server-core/cleanup"
 	"github.com/nettact/server-core/eventbus"
 	"github.com/nettact/server-core/identity"
 	"github.com/nettact/server-core/incidentops"
@@ -97,6 +98,7 @@ type deps struct {
 	identity    *identity.Service
 	registry    *registry.Service
 	incidentops *incidentops.Service
+	cleanup     *cleanup.Service
 	bus         *eventbus.Bus
 	hub         *agentws.Hub
 	ret         metrics.RetentionConfig
@@ -141,6 +143,17 @@ func startWorkers(w *workers, d deps) {
 	w.every(5*time.Second, func(ctx context.Context) {
 		if err := d.incidentops.Tick(ctx); err != nil {
 			log.Printf("incidentops tick: %v", err)
+		}
+	})
+
+	// History-data cleanup: run the one queued delete job (if any) to completion on
+	// its own short interval, so a long deletion never starves rollup/retention or
+	// the incident ticks. The tick runs synchronously, which enforces the
+	// single-job-at-a-time policy; on shutdown the workers context is cancelled and
+	// Tick returns between items, leaving any unfinished job for Recover to requeue.
+	w.every(2*time.Second, func(ctx context.Context) {
+		if err := d.cleanup.Tick(ctx); err != nil {
+			log.Printf("cleanup tick: %v", err)
 		}
 	})
 

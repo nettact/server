@@ -29,6 +29,7 @@ import (
 	"github.com/nettact/server-core/alert"
 	"github.com/nettact/server-core/api"
 	"github.com/nettact/server-core/audit"
+	"github.com/nettact/server-core/cleanup"
 	"github.com/nettact/server-core/config"
 	"github.com/nettact/server-core/eventbus"
 	"github.com/nettact/server-core/hostlive"
@@ -201,6 +202,10 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	// Authoritative current target-status aggregation (read-time; owns no state).
 	tgtStatusSvc := targetstatus.New(db)
 
+	// History-data cleanup: durable async delete jobs over the metrics store,
+	// driven by a worker tick and recovered after a restart.
+	cleanupSvc := cleanup.New(db, metricsStore)
+
 	// SSE broker fans live changes out to connected consoles. It multiplexes two
 	// streams per site on one connection: authoritative "issues" snapshots and
 	// precise "target.status.changed" events.
@@ -264,6 +269,13 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	if err := incidentOps.Recover(ctx); err != nil {
 		log.Printf("incidentops recover: %v", err)
 	}
+	// Requeue any cleanup job left mid-run by a previous stop; its pending items
+	// re-execute idempotently on the next worker tick. A failure here is non-fatal:
+	// the cleanup Tick self-heals (it requeues orphaned 'running' jobs on every run),
+	// so a transient startup lock cannot wedge the subsystem.
+	if err := cleanupSvc.Recover(ctx); err != nil {
+		log.Printf("cleanup recover (tick will self-heal): %v", err)
+	}
 
 	startWorkers(w, deps{
 		metrics:     metricsStore,
@@ -271,6 +283,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		identity:    idSvc,
 		registry:    reg,
 		incidentops: incidentOps,
+		cleanup:     cleanupSvc,
 		bus:         bus,
 		hub:         agentHub,
 		ret:         cfg.Retention,
@@ -280,6 +293,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		Identity:     idSvc,
 		Registry:     reg,
 		Metrics:      metricsStore,
+		Cleanup:      cleanupSvc,
 		Config:       cfgSvc,
 		Site:         siteSvc,
 		Inventory:    invSvc,
