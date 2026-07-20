@@ -34,6 +34,12 @@ func main() {
 	retain1hDays := flag.Int("retain-1h-days", 730, "1-hour rollup retention (days); 1-day rollups kept forever")
 	tlsCert := flag.String("tls-cert", "", "path to TLS certificate; with -tls-key serves HTTPS/WSS natively")
 	tlsKey := flag.String("tls-key", "", "path to TLS private key; with -tls-cert serves HTTPS/WSS natively")
+	// Browsers only send Secure cookies over HTTPS, so a Secure session cookie on a
+	// plain-HTTP deployment makes every login silently fail (except on localhost).
+	// auto ties the flag to how THIS process serves; true is for TLS-terminating
+	// reverse proxies (browser sees https, we serve http).
+	secureCookie := flag.String("secure-cookie", "auto",
+		"session cookie Secure attribute: auto (set iff TLS is enabled), true (always; use behind a TLS-terminating reverse proxy), false (never)")
 	flag.Parse()
 
 	// TLS is all-or-nothing: with only one flag set (a missing or mistyped mounted
@@ -44,6 +50,22 @@ func main() {
 		log.Fatal("-tls-cert and -tls-key must be provided together")
 	}
 
+	useTLS := *tlsCert != "" && *tlsKey != ""
+	var secure bool
+	switch *secureCookie {
+	case "auto":
+		secure = useTLS
+	case "true":
+		secure = true
+	case "false":
+		secure = false
+	default:
+		log.Fatalf("-secure-cookie must be auto, true or false (got %q)", *secureCookie)
+	}
+	if *dev {
+		secure = false // dev mode always serves the Vite origin over plain http
+	}
+
 	srv, err := liteserver.Start(context.Background(), liteserver.Config{
 		Addr:         *addr,
 		TLSCert:      *tlsCert,
@@ -52,7 +74,7 @@ func main() {
 		AdminUser:    *adminUser,
 		AdminPass:    *adminPass,
 		Dev:          *dev,
-		SecureCookie: !*dev,
+		SecureCookie: secure,
 		MaxAgents:    *maxAgents,
 		Retention: metrics.RetentionConfig{
 			RawSeconds: int64(*retainRawDays) * 86400,

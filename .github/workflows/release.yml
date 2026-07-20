@@ -1,0 +1,209 @@
+# Release pipeline for server-lite.
+#
+# Trigger: pushing a semver tag (v1.0.0, v1.0.0-rc.1). Versioning is independent of
+# agent/desktop.
+#
+# Dependency pinning (ci/deps.env):
+#   PROTOCOL_SHA / SERVER_CORE_SHA — sibling Go repos checked out at exact commits,
+#     so releases never wait on a sibling tag and a tag rebuilds identically.
+#   WEB_CONSOLE_VERSION — the embedded SPA is downloaded as a built artifact from
+#     web-console's GitHub Releases (latest, or a pinned vX.Y.Z). The resolved
+#     version is recorded in this release's notes.
+#
+# Required secret: CI_SUBMODULE_SSH_KEY (org-level recommended) — read access to
+# nettact/protocol and nettact/server-core. Downloading the web-console release
+# asset uses GITHUB_TOKEN if it can read that repo; otherwise set WEBUI_GH_TOKEN.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)release, e.g. v1.0.0
+        required: true
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Test · build · publish
+    runs-on: ubuntu-latest
+    environment: release          # manual-approval gate
+    permissions:
+      contents: write             # GitHub Release
+      packages: write             # push to GHCR
+      id-token: write             # cosign keyless (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          path: server-lite
+          fetch-depth: 0          # need all tags to decide whether this is the newest stable
+
+      # workflow_dispatch runs from a branch ref, so github.sha is the DISPATCH commit,
+      # not the released tag's commit. Resolve the real release commit from the checkout,
+      # and only move `latest` when this tag is the newest stable tag (re-releasing an
+      # old tag must not roll `latest` backward).
+      - name: Resolve release commit + latest eligibility
+        id: rel
+        run: |
+          set -euo pipefail
+          cd server-lite
+          TAG="${{ inputs.tag || github.ref_name }}"
+          SHA=$(git rev-parse HEAD)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          if [[ "$TAG" == *-* ]]; then
+            echo "is_latest=false" >> "$GITHUB_OUTPUT"   # prerelease never moves latest
+          else
+            newest=$(git tag -l 'v*' | grep -v -- - | sort -V | tail -1)
+            echo "newest stable tag: $newest (releasing: $TAG)"
+            [ "$TAG" = "$newest" ] && echo "is_latest=true" >> "$GITHUB_OUTPUT" \
+                                   || echo "is_latest=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Read dependency pins
+        id: deps
+        run: |
+          set -euo pipefail
+          source server-lite/ci/deps.env
+          echo "protocol_sha=${PROTOCOL_SHA}" >> "$GITHUB_OUTPUT"
+          echo "server_core_sha=${SERVER_CORE_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout protocol @ pinned SHA
+        uses: actions/checkout@v4
+        with:
+          repository: nettact/protocol
+          ref: ${{ steps.deps.outputs.protocol_sha }}
+          path: protocol
+          ssh-key: ${{ secrets.CI_SUBMODULE_SSH_KEY }}
+
+      - name: Checkout server-core @ pinned SHA
+        uses: actions/checkout@v4
+        with:
+          repository: nettact/server-core
+          ref: ${{ steps.deps.outputs.server_core_sha }}
+          path: server-core
+          ssh-key: ${{ secrets.CI_SUBMODULE_SSH_KEY }}
+
+      - name: Fetch web console dist (per deps.env / WEBUI_SOURCE)
+        id: webui
+        env:
+          GH_TOKEN: ${{ secrets.WEBUI_GH_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          out=$(bash server-lite/ci/fetch-webui.sh)
+          echo "$out"
+          echo "resolved=$(echo "$out" | tail -1 | sed 's/^resolved: //')" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: |
+            server-lite/go.sum
+            server-core/go.sum
+            protocol/go.sum
+
+      - name: Assemble workspace (trimmed go.work + versioned replaces)
+        run: |
+          set -euo pipefail
+          go work init ./protocol ./server-core ./server-lite
+          go work edit -replace github.com/nettact/protocol@v0.0.0-00010101000000-000000000000=./protocol
+          go work edit -replace github.com/nettact/server-core@v0.0.0-00010101000000-000000000000=./server-core
+
+      - name: Gate — vet · build · test (server-lite + server-core)
+        run: |
+          set -euo pipefail
+          ( cd server-core && go vet ./... && go build ./... && go test ./... )
+          ( cd server-lite && go vet ./... && go build ./... && go test ./... )
+
+      - name: Cross-compile binaries + checksums
+        run: |
+          set -euo pipefail
+          mkdir -p dist-bins
+          for arch in amd64 arm64; do
+            ( cd server-lite && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
+                go build -trimpath -ldflags "-s -w" \
+                -o "../dist-bins/nettact-lite-linux-$arch" ./cmd/nettact-lite )
+          done
+          ( cd dist-bins && sha256sum * > SHA256SUMS && cat SHA256SUMS )
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags & labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/nettact-lite
+          tags: |
+            type=raw,value=${{ inputs.tag || github.ref_name }}
+            type=raw,value=latest,enable=${{ steps.rel.outputs.is_latest }}
+            type=raw,value=sha-${{ steps.rel.outputs.sha_short }}
+
+      - name: Build & push image (linux/amd64, linux/arm64)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: server-lite/ci/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ inputs.tag || github.ref_name }}
+            REVISION=${{ steps.rel.outputs.sha }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha,scope=lite
+          cache-to: type=gha,mode=max,scope=lite
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image (keyless, by digest)
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/nettact-lite
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          prerelease: ${{ contains(inputs.tag || github.ref_name, '-') }}
+          files: |
+            dist-bins/nettact-lite-linux-amd64
+            dist-bins/nettact-lite-linux-arm64
+            dist-bins/SHA256SUMS
+          body: |
+            ## nettact-lite ${{ inputs.tag || github.ref_name }}
+
+            Built against:
+            - `nettact/protocol@${{ steps.deps.outputs.protocol_sha }}`
+            - `nettact/server-core@${{ steps.deps.outputs.server_core_sha }}`
+            - web-console **${{ steps.webui.outputs.resolved }}** (embedded SPA)
+
+            ### Container image (linux/amd64 · linux/arm64, cosign-signed)
+            ```
+            docker pull ghcr.io/${{ github.repository_owner }}/nettact-lite:${{ inputs.tag || github.ref_name }}
+            ```
+            Verify binary integrity with `sha256sum -c SHA256SUMS`.
