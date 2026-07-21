@@ -6,13 +6,12 @@
 # Dependency pinning (ci/deps.env):
 #   PROTOCOL_SHA / SERVER_CORE_SHA — sibling Go repos checked out at exact commits,
 #     so releases never wait on a sibling tag and a tag rebuilds identically.
-#   WEB_CONSOLE_VERSION — the embedded SPA is downloaded as a built artifact from
-#     web-console's GitHub Releases (latest, or a pinned vX.Y.Z). The resolved
-#     version is recorded in this release's notes.
+#   WEB_CONSOLE_VERSION — the exact web-console release tag stamped into the
+#     binary (ldflags -X); the server downloads that release AT RUNTIME from
+#     web-console's public GitHub Releases. Nothing is fetched at build time.
 #
 # Required secret: CI_SUBMODULE_SSH_KEY (org-level recommended) — read access to
-# nettact/protocol and nettact/server-core. Downloading the web-console release
-# asset uses GITHUB_TOKEN if it can read that repo; otherwise set WEBUI_GH_TOKEN.
+# nettact/protocol and nettact/server-core.
 
 name: Release
 
@@ -77,6 +76,8 @@ jobs:
           source server-lite/ci/deps.env
           echo "protocol_sha=${PROTOCOL_SHA}" >> "$GITHUB_OUTPUT"
           echo "server_core_sha=${SERVER_CORE_SHA}" >> "$GITHUB_OUTPUT"
+          [[ "${WEB_CONSOLE_VERSION}" =~ ^v[0-9] ]] || { echo "WEB_CONSOLE_VERSION must be an exact tag (got '${WEB_CONSOLE_VERSION}')" >&2; exit 1; }
+          echo "webui_version=${WEB_CONSOLE_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout protocol @ pinned SHA
         uses: actions/checkout@v4
@@ -93,16 +94,6 @@ jobs:
           ref: ${{ steps.deps.outputs.server_core_sha }}
           path: server-core
           ssh-key: ${{ secrets.CI_SUBMODULE_SSH_KEY }}
-
-      - name: Fetch web console dist (per deps.env / WEBUI_SOURCE)
-        id: webui
-        env:
-          GH_TOKEN: ${{ secrets.WEBUI_GH_TOKEN || secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          out=$(bash server-lite/ci/fetch-webui.sh)
-          echo "$out"
-          echo "resolved=$(echo "$out" | tail -1 | sed 's/^resolved: //')" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-go@v5
         with:
@@ -131,7 +122,7 @@ jobs:
           mkdir -p dist-bins
           for arch in amd64 arm64; do
             ( cd server-lite && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
-                go build -trimpath -ldflags "-s -w" \
+                go build -trimpath -ldflags "-s -w -X github.com/nettact/server-lite/internal/webui.Version=${{ steps.deps.outputs.webui_version }}" \
                 -o "../dist-bins/nettact-lite-linux-$arch" ./cmd/nettact-lite )
           done
           ( cd dist-bins && sha256sum * > SHA256SUMS && cat SHA256SUMS )
@@ -169,6 +160,7 @@ jobs:
           build-args: |
             VERSION=${{ inputs.tag || github.ref_name }}
             REVISION=${{ steps.rel.outputs.sha }}
+            WEBUI_VERSION=${{ steps.deps.outputs.webui_version }}
           provenance: true
           sbom: true
           cache-from: type=gha,scope=lite
@@ -200,7 +192,7 @@ jobs:
             Built against:
             - `nettact/protocol@${{ steps.deps.outputs.protocol_sha }}`
             - `nettact/server-core@${{ steps.deps.outputs.server_core_sha }}`
-            - web-console **${{ steps.webui.outputs.resolved }}** (embedded SPA)
+            - web-console **${{ steps.deps.outputs.webui_version }}** (downloaded by the server at runtime)
 
             ### Container image (linux/amd64 · linux/arm64, cosign-signed)
             ```

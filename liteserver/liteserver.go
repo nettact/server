@@ -1,10 +1,10 @@
 // Package liteserver is the Lite server as an importable library: one Start that
 // opens the SQLite database, bootstraps the single admin, wires every
 // server-core service, binds its own listener, and serves the HTTP/WS surface
-// plus the embedded Vue console. The standalone nettact-lite command and the
-// desktop all-in-one both drive the same code through this package — the command
-// is a thin flags→Config wrapper, and the desktop passes a non-nil Desktop config
-// to enable loopback-only one-time browser login.
+// plus the runtime-downloaded Vue console. The standalone nettact-lite command
+// and the desktop all-in-one both drive the same code through this package — the
+// command is a thin flags→Config wrapper, and the desktop passes a non-nil
+// Desktop config to enable loopback-only one-time browser login.
 //
 // Start does the full bring-up synchronously (DB, migrations, admin, listener)
 // and returns a ready *Server: a nil error from Start is readiness — the listener
@@ -20,6 +20,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -63,6 +64,11 @@ type Config struct {
 
 	DBPath string // SQLite database path
 
+	// WebUIDir is the root directory for the runtime-downloaded web console
+	// (versions install to WebUIDir/<version>/). Empty selects
+	// filepath.Dir(DBPath) + "/webui".
+	WebUIDir string
+
 	// AdminUser/AdminPass seed the single admin on first run (EnsureAdmin). On a
 	// later run they are ignored and the existing admin is used.
 	AdminUser string
@@ -104,6 +110,7 @@ type Server struct {
 	agentHub *agentws.Hub
 	broker   *sse.Broker
 	workers  *workers
+	webui    *webui.Manager
 
 	idSvc    *identity.Service
 	regSvc   *registry.Service
@@ -138,6 +145,9 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 			H1Seconds:  730 * 86400,
 			D1Seconds:  0, // 1-day rollups kept forever
 		}
+	}
+	if cfg.WebUIDir == "" {
+		cfg.WebUIDir = filepath.Join(filepath.Dir(cfg.DBPath), "webui")
 	}
 
 	db, err := store.Open(cfg.DBPath)
@@ -289,6 +299,8 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		ret:         cfg.Retention,
 	})
 
+	webuiMgr := webui.New(cfg.WebUIDir, webui.Version)
+
 	handler := api.Router(api.Deps{
 		Identity:     idSvc,
 		Registry:     reg,
@@ -310,7 +322,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		SSE:          broker,
 		AgentWS:      agentHub,
 		Bus:          bus,
-		SPA:          webui.Handler(),
+		SPA:          webuiMgr.Handler(),
 		Dev:          cfg.Dev,
 		SecureCookie: cfg.SecureCookie,
 	})
@@ -321,6 +333,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		agentHub: agentHub,
 		broker:   broker,
 		workers:  w,
+		webui:    webuiMgr,
 		idSvc:    idSvc,
 		regSvc:   reg,
 		setSvc:   settingsSvc,
@@ -393,8 +406,12 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		}
 	}()
 
-	log.Printf("nettact-lite listening on %s (dev=%v, db=%s, max_agents=%d, desktop=%v)",
-		s.baseURL, cfg.Dev, cfg.DBPath, cfg.MaxAgents, cfg.Desktop != nil)
+	log.Printf("nettact-lite listening on %s (dev=%v, db=%s, max_agents=%d, desktop=%v, webui=%s@%s)",
+		s.baseURL, cfg.Dev, cfg.DBPath, cfg.MaxAgents, cfg.Desktop != nil, webui.Version, cfg.WebUIDir)
+
+	// Nothing can fail Start past this point, so the background download loop
+	// will always be paired with a Shutdown that closes it.
+	s.webui.Start()
 
 	ok = true
 	return s, nil
@@ -446,6 +463,7 @@ func (s *Server) DialAgent(ctx context.Context, token string) (wire.Conn, error)
 func (s *Server) Shutdown(ctx context.Context) error {
 	var err error
 	s.shutdownOnce.Do(func() {
+		s.webui.Close(ctx)
 		s.agentHub.CloseAll("server shutting down")
 		// Drop SSE subscribers so their handlers return and stop querying the DB;
 		// this must precede db.Close (below) and lets http.Shutdown finish promptly

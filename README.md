@@ -8,7 +8,15 @@ NetTact **自托管 Lite 服务端** —— 单二进制，把 [server-core](htt
 go run ./cmd/nettact-lite --db ./nettact.db --addr :8080 --dev
 ```
 
-- 单用户、无租户；Web UI（M4 起）经 `go:embed` 打进二进制。
-- `--dev` 开放 CORS 便于本地对接 Vite（[web-console](https://github.com/nettact/web-console)）。
+- 单用户、无租户；Web UI **运行时自动下载**：编译时用 ldflags 烧入精确的
+  [web-console](https://github.com/nettact/web-console) 版本（`ci/deps.env` 的
+  `WEB_CONSOLE_VERSION`），首次启动检测到前端缺失时从其公开 GitHub Release
+  下载（SHA256 校验）到 `-webui-dir`（默认 `<db 目录>/webui`）。下载完成前
+  非 `/api` 路径返回内置占位页（503），API 与探针不受影响。
+  - 开发构建（未烧版本，`Version=dev`）不下载；设 `NETTACT_WEBUI_LOCAL`
+    指向本地构建好的 dist 即可直接服务。
+  - 镜像/内网部署可用 `NETTACT_WEBUI_BASE_URL` 覆盖下载源，或预置
+    `<webui-dir>/<version>/` 目录。
+- `--dev` 开放 CORS 便于本地对接 Vite（web-console）。
 
 依赖 [github.com/nettact/protocol](https://github.com/nettact/protocol) 与 [github.com/nettact/server-core](https://github.com/nettact/server-core)。本地多仓开发使用 `go.work`。

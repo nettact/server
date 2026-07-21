@@ -1,15 +1,18 @@
 # syntax=docker/dockerfile:1
 #
-# nettact-lite — the self-hosted Lite server (API + embedded web console).
+# nettact-lite — the self-hosted Lite server (API; web console downloaded at runtime).
 #
-# The web console is NOT built here: the caller must place a built SPA into
-# server-lite/internal/webui/dist BEFORE this build (the release workflow runs
-# ci/fetch-webui.sh; developers can use build-lite.sh or fetch-webui.sh local:).
+# The web console is NOT built or embedded here: the exact web-console release
+# tag is stamped in via the WEBUI_VERSION build-arg, and the server downloads it
+# on first start into /data/webui (verified against SHA256SUMS). Air-gapped
+# deployments can set NETTACT_WEBUI_BASE_URL to a mirror or pre-seed
+# /data/webui/<version>/ with a built dist.
 #
 # Build context: an assembled workspace directory with protocol/, server-core/ and
 # server-lite/ as siblings (the release workflow checks the siblings out at
 # ci/deps.env's pinned SHAs):
-#   docker build -f server-lite/ci/Dockerfile --build-arg VERSION=v1.0.0 <workspace-dir>
+#   docker build -f server-lite/ci/Dockerfile --build-arg VERSION=v1.0.0 \
+#     --build-arg WEBUI_VERSION=v0.1.0 <workspace-dir>
 # An isolated single-repo build fails on the v0.0.0 placeholder pseudo-versions.
 
 # ---- Stage 1: cross-compile the static server binary -----------------------
@@ -27,10 +30,11 @@ RUN go work init ./protocol ./server-core ./server-lite \
  && go work edit -replace github.com/nettact/server-core@v0.0.0-00010101000000-000000000000=./server-core
 ARG TARGETOS
 ARG TARGETARCH
+ARG WEBUI_VERSION=dev
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags "-s -w" \
+    go build -trimpath -ldflags "-s -w -X github.com/nettact/server-lite/internal/webui.Version=${WEBUI_VERSION}" \
       -o /out/nettact-lite ./server-lite/cmd/nettact-lite
 
 # ---- Stage 2: minimal runtime ----------------------------------------------
@@ -43,7 +47,8 @@ COPY --from=build /out/nettact-lite /usr/local/bin/nettact-lite
 USER nettact
 WORKDIR /data
 # A fresh named volume inherits /data's ownership (nettact), so the non-root user can
-# write nettact.db*. Bind mounts must be made writable by this UID on the host.
+# write nettact.db* and the runtime-downloaded web console under /data/webui.
+# Bind mounts must be made writable by this UID on the host.
 VOLUME ["/data"]
 # Container-internal port is always 8080; the published port is chosen in compose.
 EXPOSE 8080
@@ -56,7 +61,7 @@ CMD ["-addr", ":8080", "-db", "/data/nettact.db"]
 ARG VERSION=dev
 ARG REVISION=unknown
 LABEL org.opencontainers.image.title="nettact-lite" \
-      org.opencontainers.image.description="NetTact self-hosted Lite server (API + embedded web console)" \
+      org.opencontainers.image.description="NetTact self-hosted Lite server (API; web console downloaded at runtime)" \
       org.opencontainers.image.source="https://github.com/nettact/server-lite" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${REVISION}" \

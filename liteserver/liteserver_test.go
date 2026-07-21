@@ -212,3 +212,23 @@ func TestWorkersStopGatesNewWork(t *testing.T) {
 	}
 	w.wg.Done()
 }
+
+func TestRootServesWebUIPlaceholderInDevBuild(t *testing.T) {
+	// webui.Version is "dev" under test, so the manager must serve the built-in
+	// placeholder without any network access — this keeps go test offline-safe
+	// in every CI gate.
+	srv := startDesktopTestServer(t, filepath.Join(t.TempDir(), "webui.db"), time.Minute)
+
+	resp, err := http.Get(srv.BaseURL() + "/") //nolint:gosec // loopback test server
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("GET / status = %d; want 503 placeholder", resp.StatusCode)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(b), "NetTact") {
+		t.Fatalf("placeholder body missing product name: %q", b)
+	}
+}

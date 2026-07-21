@@ -22,6 +22,7 @@ import (
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	dbPath := flag.String("db", "./nettact.db", "SQLite database path")
+	webuiDir := flag.String("webui-dir", "", "web console download/install directory (default: <db dir>/webui)")
 	dev := flag.Bool("dev", false, "dev mode: open CORS for the Vite origin, non-Secure cookie")
 	adminUser := flag.String("admin-user", "", "bootstrap admin username (first run only)")
 	adminPass := flag.String("admin-pass", "", "bootstrap admin password (first run only)")
@@ -71,6 +72,7 @@ func main() {
 		TLSCert:      *tlsCert,
 		TLSKey:       *tlsKey,
 		DBPath:       *dbPath,
+		WebUIDir:     *webuiDir,
 		AdminUser:    *adminUser,
 		AdminPass:    *adminPass,
 		Dev:          *dev,
