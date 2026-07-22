@@ -21,6 +21,11 @@ const (
 	// envLocalDir points at a locally built web-console dist (dev builds). When
 	// set and valid it is served directly and downloading is disabled.
 	envLocalDir = "NETTACT_WEBUI_LOCAL"
+
+	// defaultLocalDir is tried by dev builds when envLocalDir is unset: the
+	// sibling web-console checkout's build output, relative to the working
+	// directory (module roots in the workspace are siblings of web-console).
+	defaultLocalDir = "../web-console/dist"
 )
 
 // Manager owns the console UI lifecycle: it serves whatever is available now
@@ -67,6 +72,11 @@ func New(dir, version string) *Manager {
 			return m
 		}
 		m.logf("webui: %s=%q has no index.html; ignoring", envLocalDir, local)
+	} else if version == "dev" && hasIndex(os.DirFS(defaultLocalDir)) {
+		m.store(spaHandler(os.DirFS(defaultLocalDir)))
+		m.started = true
+		m.logf("webui: dev build, serving local dist from %s", defaultLocalDir)
+		return m
 	}
 
 	installed := filepath.Join(dir, version)

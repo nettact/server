@@ -14,5 +14,5 @@ package webui
 //
 // with the value from ci/deps.env WEB_CONSOLE_VERSION. "dev" (unstamped)
 // disables downloading: the Manager serves NETTACT_WEBUI_LOCAL if set, else
-// the placeholder page.
+// ../web-console/dist if it holds a built dist, else the placeholder page.
 var Version = "dev"
