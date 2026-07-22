@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -54,9 +55,14 @@ import (
 
 // Config drives one Start. Zero values select the documented defaults.
 type Config struct {
-	// Addr is passed verbatim to net.Listen("tcp", Addr), preserving the full
-	// standalone semantics (":8080", "0.0.0.0:8443", "host:port", "127.0.0.1:0").
+	// Addr is the fallback listen address — an explicit -addr flag or the built-in
+	// default — passed to net.Listen("tcp", ...) unless a listen_addr setting
+	// saved in the web console overrides it (DB > flag > default).
 	Addr string
+
+	// AddrFromFlag marks Addr as coming from an explicit -addr flag (vs the
+	// built-in default). Used only for source reporting in server-info.
+	AddrFromFlag bool
 
 	// TLSCert/TLSKey enable HTTPS/WSS natively. Both or neither (validated).
 	TLSCert string
@@ -86,8 +92,8 @@ type Config struct {
 
 	// Desktop, when non-nil, enables the desktop-only surface: the
 	// GET /desktop/login one-time-token endpoint and per-launch console_base_url
-	// rewrite. It also tightens Addr validation to a loopback literal on port 0
-	// with no TLS. nil means standalone — none of that surface exists.
+	// rewrite. It also tightens Addr validation to a loopback literal with no
+	// TLS. nil means standalone — none of that surface exists.
 	Desktop *DesktopConfig
 }
 
@@ -96,6 +102,12 @@ type DesktopConfig struct {
 	// LoginTokenTTL bounds how long a minted one-time login URL stays redeemable.
 	// 0 selects 2 minutes.
 	LoginTokenTTL time.Duration
+
+	// OnListenAddrChanged, when non-nil, fires from a background goroutine
+	// (shortly after the settings PUT response has been written) when the console
+	// saves a new listen address. The desktop host restarts the embedded server
+	// in response; without it a saved change waits for the next launch.
+	OnListenAddrChanged func(newAddr string)
 }
 
 // Server is a running Lite server. It owns the listener, HTTP server, agent hub,
@@ -106,6 +118,7 @@ type Server struct {
 	httpSrv *http.Server
 	ln      net.Listener
 	baseURL string
+	listen  listenResolution
 
 	agentHub *agentws.Hub
 	broker   *sse.Broker
@@ -122,6 +135,38 @@ type Server struct {
 
 	errCh        chan error
 	shutdownOnce sync.Once
+}
+
+// ErrListen marks a bind failure from Start (port in use, permission denied).
+// The desktop host matches it with errors.Is to show a port-specific dialog.
+var ErrListen = errors.New("liteserver: listen failed")
+
+// listenResolution is the outcome of the DB > flag > default listen-address
+// resolution, reported through server-info.
+type listenResolution struct {
+	addr         string
+	source       string // "default" | "flag" | "db"
+	fallbackFrom string // configured addr that failed to bind (source reverted to flag/default)
+}
+
+// resolveListenAddr applies the listen-address priority: a valid listen_addr
+// setting saved in the console wins over cfg.Addr (explicit flag or built-in
+// default). A malformed stored value is logged and ignored rather than
+// preventing startup.
+func resolveListenAddr(ctx context.Context, set *settings.Service, cfg Config) listenResolution {
+	flagOrDefault := "default"
+	if cfg.AddrFromFlag {
+		flagOrDefault = "flag"
+	}
+	v, err := set.Get(ctx, settings.KeyListenAddr)
+	if err != nil || v == "" {
+		return listenResolution{addr: cfg.Addr, source: flagOrDefault}
+	}
+	if _, _, splitErr := net.SplitHostPort(v); splitErr != nil {
+		log.Printf("ignoring malformed listen_addr setting %q: %v", v, splitErr)
+		return listenResolution{addr: cfg.Addr, source: flagOrDefault}
+	}
+	return listenResolution{addr: v, source: "db"}
 }
 
 // Start brings the server fully up and returns it ready. ctx bounds only the
@@ -301,7 +346,28 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 
 	webuiMgr := webui.New(cfg.WebUIDir, webui.Version)
 
-	handler := api.Router(api.Deps{
+	// Resolve the listen address (DB > flag > default) before building the router
+	// so its status closure can report the outcome; the actual bind happens below.
+	listenRes := resolveListenAddr(ctx, settingsSvc, cfg)
+
+	// s is allocated before the router because the api Deps closures read it
+	// (lazily, at request time — well after Start has filled ln/baseURL/listen).
+	s := &Server{
+		cfg:      cfg,
+		db:       db,
+		agentHub: agentHub,
+		broker:   broker,
+		workers:  w,
+		webui:    webuiMgr,
+		idSvc:    idSvc,
+		regSvc:   reg,
+		setSvc:   settingsSvc,
+		auditSvc: auditSvc,
+		adminID:  admin.ID,
+		errCh:    make(chan error, 1),
+	}
+
+	apiDeps := api.Deps{
 		Identity:     idSvc,
 		Registry:     reg,
 		Metrics:      metricsStore,
@@ -325,22 +391,25 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		SPA:          webuiMgr.Handler(),
 		Dev:          cfg.Dev,
 		SecureCookie: cfg.SecureCookie,
-	})
-
-	s := &Server{
-		cfg:      cfg,
-		db:       db,
-		agentHub: agentHub,
-		broker:   broker,
-		workers:  w,
-		webui:    webuiMgr,
-		idSvc:    idSvc,
-		regSvc:   reg,
-		setSvc:   settingsSvc,
-		auditSvc: auditSvc,
-		adminID:  admin.ID,
-		errCh:    make(chan error, 1),
+		ListenStatus: func(context.Context) *api.ListenStatus {
+			return &api.ListenStatus{
+				EffectiveAddr: s.ln.Addr().String(),
+				Source:        s.listen.source,
+				Desktop:       cfg.Desktop != nil,
+				FallbackFrom:  s.listen.fallbackFrom,
+				OverridesFlag: s.listen.source == "db" && cfg.AddrFromFlag,
+			}
+		},
 	}
+	if cfg.Desktop != nil && cfg.Desktop.OnListenAddrChanged != nil {
+		apiDeps.ApplyListenAddr = func(_ context.Context, addr string) error {
+			// Defer the callback so the settings PUT response flushes before the
+			// desktop tears the listener down for the restart.
+			time.AfterFunc(500*time.Millisecond, func() { cfg.Desktop.OnListenAddrChanged(addr) })
+			return nil
+		}
+	}
+	handler := api.Router(apiDeps)
 
 	// Desktop mode adds the one-time-token login endpoint in front of the router.
 	if cfg.Desktop != nil {
@@ -351,12 +420,27 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		handler = mux
 	}
 
-	ln, err := net.Listen("tcp", cfg.Addr)
+	ln, err := net.Listen("tcp", listenRes.addr)
+	if err != nil && listenRes.source == "db" {
+		// A saved-but-unbindable address must never brick the server (on desktop
+		// there would be no UI left to fix it): fall back to the flag/default addr
+		// and report the failure through server-info (FallbackFrom).
+		log.Printf("configured listen_addr %s failed (%v); falling back to %s", listenRes.addr, err, cfg.Addr)
+		listenRes.fallbackFrom = listenRes.addr
+		listenRes.addr = cfg.Addr
+		if cfg.AddrFromFlag {
+			listenRes.source = "flag"
+		} else {
+			listenRes.source = "default"
+		}
+		ln, err = net.Listen("tcp", cfg.Addr)
+	}
 	if err != nil {
 		w.stop(context.Background())
-		return nil, fmt.Errorf("listen %s: %w", cfg.Addr, err)
+		return nil, fmt.Errorf("%w: listen %s: %v", ErrListen, listenRes.addr, err)
 	}
 	s.ln = ln
+	s.listen = listenRes
 
 	scheme := "http"
 	if cfg.TLSCert != "" {
@@ -369,10 +453,10 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	// In desktop mode the OS-assigned port changes every launch, so rewrite the
-	// deep-link origin unconditionally (skip the write only when unchanged). A
-	// loopback-only bind makes any previously stored LAN URL unreachable anyway,
-	// so force-overwrite is always correct here.
+	// In desktop mode the bound port can change (a saved listen setting, or a
+	// fallback after a failed bind), so rewrite the deep-link origin whenever it
+	// differs. A loopback-only bind makes any previously stored LAN URL
+	// unreachable anyway, so force-overwrite is always correct here.
 	if cfg.Desktop != nil {
 		if cur, _ := settingsSvc.Get(ctx, settings.KeyConsoleBaseURL); cur != s.baseURL {
 			if err := settingsSvc.Set(ctx, settings.KeyConsoleBaseURL, s.baseURL); err != nil {
@@ -501,8 +585,10 @@ func targetStatusEventData(siteID string, targetIDs []string) []byte {
 }
 
 // validate enforces the config invariants. In desktop mode it structurally
-// guarantees "OS-assigned loopback port, never 8080, never LAN": the host must be
-// a loopback literal, the port must be exactly 0, and TLS must be unset.
+// guarantees "loopback fallback, never LAN by default": the fallback host must
+// be a loopback literal with a valid numeric port and TLS unset. (A saved
+// listen_addr setting may still select 0.0.0.0 — that is validated separately
+// at save time.)
 func validate(cfg Config) error {
 	if cfg.Addr == "" {
 		return errors.New("liteserver: Addr is required")
@@ -519,8 +605,10 @@ func validate(cfg Config) error {
 		if ip == nil || !ip.IsLoopback() {
 			return fmt.Errorf("liteserver: desktop mode requires a loopback host, got %q", host)
 		}
-		if port != "0" {
-			return fmt.Errorf("liteserver: desktop mode requires port 0 (OS-assigned), got %q", port)
+		if n, err := strconv.Atoi(port); err != nil || n < 0 || n > 65535 {
+			// Port 0 (OS-assigned) stays allowed for tests; the desktop app passes
+			// the fixed default 12450.
+			return fmt.Errorf("liteserver: desktop mode requires a numeric port, got %q", port)
 		}
 		if cfg.TLSCert != "" {
 			return errors.New("liteserver: desktop mode does not use TLS")

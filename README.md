@@ -5,7 +5,7 @@ NetTact **自托管 Lite 服务端** —— 单二进制，把 [server-core](htt
 运行：
 
 ```
-go run ./cmd/nettact-lite --db ./nettact.db --addr :8080 --dev
+go run ./cmd/nettact-lite --db ./nettact.db --addr :12450 --dev
 ```
 
 - 单用户、无租户；Web UI **运行时自动下载**：编译时用 ldflags 烧入精确的

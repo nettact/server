@@ -20,7 +20,7 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", ":8080", "listen address")
+	addr := flag.String("addr", ":12450", "listen address (a listen address saved in the web console overrides this flag)")
 	dbPath := flag.String("db", "./nettact.db", "SQLite database path")
 	webuiDir := flag.String("webui-dir", "", "web console download/install directory (default: <db dir>/webui)")
 	dev := flag.Bool("dev", false, "dev mode: open CORS for the Vite origin, non-Secure cookie")
@@ -42,6 +42,13 @@ func main() {
 	secureCookie := flag.String("secure-cookie", "auto",
 		"session cookie Secure attribute: auto (set iff TLS is enabled), true (always; use behind a TLS-terminating reverse proxy), false (never)")
 	flag.Parse()
+
+	addrFromFlag := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "addr" {
+			addrFromFlag = true
+		}
+	})
 
 	// TLS is all-or-nothing: with only one flag set (a missing or mistyped mounted
 	// secret), silently falling back to plaintext would expose bearer tokens and
@@ -69,6 +76,7 @@ func main() {
 
 	srv, err := liteserver.Start(context.Background(), liteserver.Config{
 		Addr:         *addr,
+		AddrFromFlag: addrFromFlag,
 		TLSCert:      *tlsCert,
 		TLSKey:       *tlsKey,
 		DBPath:       *dbPath,
@@ -85,7 +93,7 @@ func main() {
 			D1Seconds:  0, // 1-day rollups kept forever
 		},
 		// Desktop stays nil: standalone Lite exposes no one-time-login endpoint and
-		// keeps the default -addr :8080 bind.
+		// keeps the default -addr :12450 bind.
 	})
 	if err != nil {
 		log.Fatalf("start: %v", err)

@@ -50,13 +50,13 @@ WORKDIR /data
 # write nettact.db* and the runtime-downloaded web console under /data/webui.
 # Bind mounts must be made writable by this UID on the host.
 VOLUME ["/data"]
-# Container-internal port is always 8080; the published port is chosen in compose.
-EXPOSE 8080
+# Container-internal port is always 12450; the published port is chosen in compose.
+EXPOSE 12450
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD wget -qO- http://127.0.0.1:8080/api/v1/healthz >/dev/null 2>&1 || exit 1
+  CMD wget -qO- http://127.0.0.1:12450/api/v1/healthz >/dev/null 2>&1 || exit 1
 ENTRYPOINT ["nettact-lite"]
 # Sensible defaults; compose overrides `command:` to inject -admin-user/-admin-pass etc.
-CMD ["-addr", ":8080", "-db", "/data/nettact.db"]
+CMD ["-addr", ":12450", "-db", "/data/nettact.db"]
 
 ARG VERSION=dev
 ARG REVISION=unknown

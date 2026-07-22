@@ -146,11 +146,11 @@ func TestValidateDesktopAndStandaloneAddresses(t *testing.T) {
 		ok   bool
 	}{
 		{"desktop-dynamic-loopback", Config{Addr: "127.0.0.1:0", Desktop: &DesktopConfig{}}, true},
-		{"desktop-fixed-port", Config{Addr: "127.0.0.1:8081", Desktop: &DesktopConfig{}}, false},
+		{"desktop-fixed-port", Config{Addr: "127.0.0.1:12450", Desktop: &DesktopConfig{}}, true},
 		{"desktop-lan", Config{Addr: "0.0.0.0:0", Desktop: &DesktopConfig{}}, false},
 		{"desktop-tls", Config{Addr: "127.0.0.1:0", TLSCert: "cert", TLSKey: "key", Desktop: &DesktopConfig{}}, false},
-		{"standalone-any", Config{Addr: ":8080"}, true},
-		{"partial-tls", Config{Addr: ":8080", TLSCert: "cert"}, false},
+		{"standalone-any", Config{Addr: ":12450"}, true},
+		{"partial-tls", Config{Addr: ":12450", TLSCert: "cert"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := validate(tc.cfg)
