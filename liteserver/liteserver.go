@@ -108,6 +108,10 @@ type DesktopConfig struct {
 	// saves a new listen address. The desktop host restarts the embedded server
 	// in response; without it a saved change waits for the next launch.
 	OnListenAddrChanged func(newAddr string)
+
+	// OnAlertsChanged, when non-nil, fires from a background goroutine after an
+	// alert is raised or resolved. The desktop refreshes its tray summary.
+	OnAlertsChanged func()
 }
 
 // Server is a running Lite server. It owns the listener, HTTP server, agent hub,
@@ -129,6 +133,7 @@ type Server struct {
 	regSvc   *registry.Service
 	setSvc   *settings.Service
 	auditSvc *audit.Service
+	alertSvc *alert.Service
 	adminID  string
 
 	login *loginTokens // nil unless Desktop != nil
@@ -343,6 +348,12 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		hub:         agentHub,
 		ret:         cfg.Retention,
 	})
+	// Desktop tray summary: alert lifecycle changes kick an immediate refresh.
+	if cfg.Desktop != nil && cfg.Desktop.OnAlertsChanged != nil {
+		onAlerts := func(eventbus.Message) { go cfg.Desktop.OnAlertsChanged() }
+		bus.Subscribe(eventbus.TopicAlertRaised, onAlerts)
+		bus.Subscribe(eventbus.TopicAlertResolved, onAlerts)
+	}
 
 	webuiMgr := webui.New(cfg.WebUIDir, webui.Version)
 
@@ -363,6 +374,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		regSvc:   reg,
 		setSvc:   settingsSvc,
 		auditSvc: auditSvc,
+		alertSvc: alertSvc,
 		adminID:  admin.ID,
 		errCh:    make(chan error, 1),
 	}
@@ -510,6 +522,12 @@ func (s *Server) BaseURL() string { return s.baseURL }
 // is sent, and the channel is closed when serving ends (including a clean
 // Shutdown), so a lifetime watcher blocked on receive always unblocks.
 func (s *Server) Err() <-chan error { return s.errCh }
+
+// ActiveAlertCount reports the default site's firing alert count, consumed
+// in-process by the desktop tray summary.
+func (s *Server) ActiveAlertCount(ctx context.Context) (int, error) {
+	return s.alertSvc.CountActive(ctx, site.DefaultSiteID)
+}
 
 // MintEnrollmentToken issues a one-time enrollment token for the default site,
 // used by the desktop host to enroll its bundled agent in-process (no token ever
