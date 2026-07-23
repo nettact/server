@@ -247,8 +247,11 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	// Config force-resolves alerts of removed targets/rules through the fault engine
 	// (AlertTerminator), so it takes rulesSvc rather than the alert read model.
 	cfgSvc := config.New(db, reg, bus, rulesSvc)
-	if err := cfgSvc.SeedDefaults(ctx, site.DefaultSiteID); err != nil {
-		log.Printf("seed default targets: %v", err)
+	// The site's undeletable default monitor group must exist before the console
+	// (or the first-run onboarding wizard) writes targets. Starter-target creation
+	// is owned by the wizard now, so first boot leaves an empty target list.
+	if _, err := cfgSvc.EnsureDefaultGroup(ctx, site.DefaultSiteID); err != nil {
+		log.Printf("ensure default monitor group: %v", err)
 	}
 
 	auditSvc := audit.New(db)
