@@ -139,6 +139,52 @@ func TestDesktopStartLoginReplayShutdownAndRestart(t *testing.T) {
 	}
 }
 
+// TestStandaloneStartWithoutCredentials covers the first-run auto-generate path:
+// a standalone (Desktop==nil) Start with no AdminUser/AdminPass must bring the
+// server fully up (the generated password is printed, not returned), and a
+// second Start on the same DB must succeed against the existing admin without
+// any credentials.
+func TestStandaloneStartWithoutCredentials(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "standalone.db")
+	srv, err := Start(context.Background(), Config{
+		Addr:      "127.0.0.1:0",
+		DBPath:    dbPath,
+		MaxAgents: 5,
+	})
+	if err != nil {
+		t.Fatalf("Start without credentials: %v", err)
+	}
+	resp, err := http.Get(srv.BaseURL() + "/api/v1/healthz") //nolint:gosec // loopback test server
+	if err != nil {
+		t.Fatalf("healthz: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("healthz status = %d", resp.StatusCode)
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		cancel()
+		t.Fatalf("Shutdown: %v", err)
+	}
+	cancel()
+
+	// Restart on the same DB: the existing admin is reused, still no credentials.
+	second, err := Start(context.Background(), Config{
+		Addr:      "127.0.0.1:0",
+		DBPath:    dbPath,
+		MaxAgents: 5,
+	})
+	if err != nil {
+		t.Fatalf("second Start without credentials: %v", err)
+	}
+	shutdownCtx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel2()
+	if err := second.Shutdown(shutdownCtx2); err != nil {
+		t.Fatalf("second Shutdown: %v", err)
+	}
+}
+
 func TestValidateDesktopAndStandaloneAddresses(t *testing.T) {
 	for _, tc := range []struct {
 		name string

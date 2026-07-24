@@ -221,9 +221,24 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	}
 
 	idSvc := identity.New(db)
-	admin, err := idSvc.EnsureAdmin(ctx, cfg.AdminUser, cfg.AdminPass)
+	admin, generatedPass, err := idSvc.EnsureAdmin(ctx, cfg.AdminUser, cfg.AdminPass)
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap admin: %w", err)
+	}
+	// First run with no supplied credentials: print the generated password once,
+	// prominently, so a standalone operator can log in. Never in desktop mode —
+	// there the admin logs in through a one-time token and the random password is
+	// intentionally never surfaced.
+	if generatedPass != "" && cfg.Desktop == nil {
+		log.Printf("\n"+
+			"========================================================================\n"+
+			"  NetTact first run: an initial admin account has been created.\n"+
+			"    username: %s\n"+
+			"    password: %s\n"+
+			"  This password is printed ONCE. Log in and change it in Settings\n"+
+			"  (or run `nettact-lite passwd`).\n"+
+			"========================================================================",
+			admin.Username, generatedPass)
 	}
 
 	bus := eventbus.New()

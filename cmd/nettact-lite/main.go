@@ -4,28 +4,48 @@
 // installs signal handling, and calls liteserver.Start/Shutdown. All
 // orchestration (DB, admin bootstrap, services, workers, listener) lives in
 // liteserver, shared with the desktop all-in-one build.
+//
+// The `passwd` subcommand (nettact-lite passwd -db <path>) resets the admin
+// password out of band for lost-password recovery, reading the new password
+// interactively so it never reaches the shell history or process list.
 package main
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"flag"
+	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"golang.org/x/term"
+
+	"github.com/nettact/server-core/identity"
 	"github.com/nettact/server-core/metrics"
+	"github.com/nettact/server-core/store"
 	"github.com/nettact/server-lite/liteserver"
 )
 
 func main() {
+	// Subcommand dispatch before flag parsing: `passwd` runs its own FlagSet and
+	// exits without touching the server flag surface.
+	if len(os.Args) > 1 && os.Args[1] == "passwd" {
+		runPasswd(os.Args[2:])
+		return
+	}
+
 	addr := flag.String("addr", ":12450", "listen address (a listen address saved in the web console overrides this flag)")
 	dbPath := flag.String("db", "./nettact.db", "SQLite database path")
 	webuiDir := flag.String("webui-dir", "", "web console download/install directory (default: <db dir>/webui)")
 	dev := flag.Bool("dev", false, "dev mode: open CORS for the Vite origin, non-Secure cookie")
-	adminUser := flag.String("admin-user", "", "bootstrap admin username (first run only)")
-	adminPass := flag.String("admin-pass", "", "bootstrap admin password (first run only)")
+	adminUser := flag.String("admin-user", "", "optional; first run only; if omitted an initial password is generated and printed")
+	adminPass := flag.String("admin-pass", "", "optional; first run only; if omitted an initial password is generated and printed")
 	maxAgents := flag.Int("max-agents", 50, "max enrolled agents (0 = unlimited)")
 	// Raw only serves chart reads of ranges ≤2h (longer ranges read the rollups),
 	// so its default is days, not weeks — at 1s probe intervals every extra raw
@@ -113,4 +133,64 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown: %v", err)
 	}
+}
+
+// runPasswd implements `nettact-lite passwd -db <path>`: it reads a new password
+// interactively (never via a flag, so it stays out of the shell history and the
+// process list), then resets the single admin's password directly in the
+// database and invalidates every existing session.
+func runPasswd(args []string) {
+	fs := flag.NewFlagSet("passwd", flag.ExitOnError)
+	dbPath := fs.String("db", "./nettact.db", "SQLite database path")
+	_ = fs.Parse(args)
+
+	newPass, err := readNewPassword()
+	if err != nil {
+		log.Fatalf("passwd: %v", err)
+	}
+
+	db, err := store.Open(*dbPath)
+	if err != nil {
+		log.Fatalf("passwd: open db %s: %v", *dbPath, err)
+	}
+	defer db.Close()
+
+	username, err := identity.New(db).ResetAdminPassword(context.Background(), newPass)
+	if err != nil {
+		log.Fatalf("passwd: %v", err)
+	}
+	fmt.Printf("password for user %q reset; all sessions have been logged out\n", username)
+	fmt.Println("if the server is currently running, restart it so the change takes full effect.")
+}
+
+// readNewPassword reads and confirms the new password. On an interactive
+// terminal it disables echo (x/term) and reads twice, requiring the entries to
+// match; when stdin is piped it reads a single line. The password policy is
+// enforced later by ResetAdminPassword.
+func readNewPassword() (string, error) {
+	fd := int(os.Stdin.Fd())
+	if term.IsTerminal(fd) {
+		fmt.Print("New password: ")
+		first, err := term.ReadPassword(fd)
+		fmt.Println()
+		if err != nil {
+			return "", fmt.Errorf("read password: %w", err)
+		}
+		fmt.Print("Confirm new password: ")
+		second, err := term.ReadPassword(fd)
+		fmt.Println()
+		if err != nil {
+			return "", fmt.Errorf("read password: %w", err)
+		}
+		if string(first) != string(second) {
+			return "", errors.New("passwords do not match")
+		}
+		return string(first), nil
+	}
+	// Non-interactive (piped) input: read a single line and strip the newline.
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("read password: %w", err)
+	}
+	return strings.TrimRight(line, "\r\n"), nil
 }

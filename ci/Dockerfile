@@ -55,7 +55,8 @@ EXPOSE 12450
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD wget -qO- http://127.0.0.1:12450/api/v1/healthz >/dev/null 2>&1 || exit 1
 ENTRYPOINT ["nettact-lite"]
-# Sensible defaults; compose overrides `command:` to inject -admin-user/-admin-pass etc.
+# Sensible defaults; compose overrides `command:` to set -addr/-max-agents etc. The
+# admin account is auto-created with a printed one-time password on first run.
 CMD ["-addr", ":12450", "-db", "/data/nettact.db"]
 
 ARG VERSION=dev

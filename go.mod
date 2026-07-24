@@ -5,6 +5,7 @@ go 1.25
 require (
 	github.com/nettact/protocol v0.0.0-00010101000000-000000000000
 	github.com/nettact/server-core v0.0.0-00010101000000-000000000000
+	golang.org/x/term v0.30.0
 )
 
 require (
@@ -15,7 +16,7 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	golang.org/x/sys v0.30.0 // indirect
+	golang.org/x/sys v0.31.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	modernc.org/libc v1.55.3 // indirect
 	modernc.org/mathutil v1.6.0 // indirect
