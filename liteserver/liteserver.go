@@ -27,6 +27,8 @@ import (
 
 	"github.com/nettact/protocol/enroll"
 	"github.com/nettact/protocol/wire"
+	"github.com/nettact/server-core/agentalert"
+	"github.com/nettact/server-core/agentstatus"
 	"github.com/nettact/server-core/agentws"
 	"github.com/nettact/server-core/alert"
 	"github.com/nettact/server-core/api"
@@ -265,6 +267,12 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	// Authoritative current target-status aggregation (read-time; owns no state).
 	tgtStatusSvc := targetstatus.New(db)
 
+	// Agent status list (AGENT-001): per-agent health + resource rollup (read-time).
+	agentStatusSvc := agentstatus.New(db, metricsStore, settingsSvc)
+	// Agent connectivity-alert engine (AGENT-002): offline/recovery state machine,
+	// driven by a worker tick fed the live connected-session set.
+	agentAlertEng := agentalert.New(db, settingsSvc, notifSvc, bus)
+
 	// History-data cleanup: durable async delete jobs over the metrics store,
 	// driven by a worker tick and recovered after a restart.
 	cleanupSvc := cleanup.New(db, metricsStore)
@@ -292,8 +300,8 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		})
 	})
 	// Agent liveness flips affect every target in the agent's scope, so a bridge
-	// fans it out to a site-wide status refresh (empty target-id set). This is the
-	// only place an agent online↔offline transition reaches target status.
+	// fans it out to a site-wide status refresh (empty target-id set). It also
+	// refreshes the agent-status list (a liveness change flips an agent's status).
 	bus.Subscribe(eventbus.TopicAgentLivenessChanged, func(m eventbus.Message) {
 		ev, ok := m.Payload.(eventbus.AgentLivenessChanged)
 		if !ok {
@@ -303,6 +311,43 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 			Name: sse.EventTargetStatusChanged,
 			Data: targetStatusEventData(ev.SiteID, nil),
 		})
+		broker.Notify(ev.SiteID, sse.Event{
+			Name: sse.EventAgentStatusChanged,
+			Data: agentStatusEventData(ev.SiteID),
+		})
+	})
+	// Agent-status list also refreshes on a connectivity-alert open/resolve, and on
+	// rule-alert / operational-issue changes (they drive an agent's abnormal state
+	// and reason counts). The client coalesces these into one wholesale refetch.
+	agentStatusBridge := func(siteID string) {
+		broker.Notify(siteID, sse.Event{Name: sse.EventAgentStatusChanged, Data: agentStatusEventData(siteID)})
+	}
+	bus.Subscribe(eventbus.TopicAgentAlertChanged, func(m eventbus.Message) {
+		if ev, ok := m.Payload.(eventbus.AgentAlertChanged); ok {
+			agentStatusBridge(ev.SiteID)
+		}
+	})
+	bus.Subscribe(eventbus.TopicAlertRaised, func(m eventbus.Message) {
+		if ev, ok := m.Payload.(alert.Raised); ok {
+			agentStatusBridge(ev.SiteID)
+		}
+	})
+	bus.Subscribe(eventbus.TopicAlertResolved, func(m eventbus.Message) {
+		if ev, ok := m.Payload.(alert.Raised); ok {
+			agentStatusBridge(ev.SiteID)
+		}
+	})
+	bus.Subscribe(eventbus.TopicIssueChanged, func(m eventbus.Message) {
+		if ev, ok := m.Payload.(eventbus.IssueChanged); ok {
+			agentStatusBridge(ev.SiteID)
+		}
+	})
+	// Agent-group rename/delete/membership publishes config.changed; refresh the
+	// agent-status list so its group chips and the group filter stay current.
+	bus.Subscribe(eventbus.TopicConfigChanged, func(m eventbus.Message) {
+		if ev, ok := m.Payload.(eventbus.ConfigChanged); ok {
+			agentStatusBridge(ev.SiteID)
+		}
 	})
 
 	agentHub := agentws.New(agentws.Deps{
@@ -347,6 +392,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		registry:    reg,
 		incidentops: incidentOps,
 		cleanup:     cleanupSvc,
+		agentalert:  agentAlertEng,
 		bus:         bus,
 		hub:         agentHub,
 		ret:         cfg.Retention,
@@ -400,6 +446,8 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		HostLive:     hostLive,
 		OpIssue:      opSvc,
 		TargetStatus: tgtStatusSvc,
+		AgentStatus:  agentStatusSvc,
+		AgentAlert:   agentAlertEng,
 		SSE:          broker,
 		AgentWS:      agentHub,
 		Bus:          bus,
@@ -601,6 +649,17 @@ func targetStatusEventData(siteID string, targetIDs []string) []byte {
 	data, err := json.Marshal(map[string]any{"site_id": siteID, "target_ids": targetIDs})
 	if err != nil {
 		return []byte(`{"site_id":"","target_ids":[]}`)
+	}
+	return data
+}
+
+// agentStatusEventData marshals the "agent.status.changed" SSE payload. It is
+// signal-only (just the affected site): the client always refetches the whole
+// site's agent-status list, so there is nothing to drift.
+func agentStatusEventData(siteID string) []byte {
+	data, err := json.Marshal(map[string]any{"site_id": siteID})
+	if err != nil {
+		return []byte(`{"site_id":""}`)
 	}
 	return data
 }

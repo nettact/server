@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nettact/server-core/agentalert"
 	"github.com/nettact/server-core/agentws"
 	"github.com/nettact/server-core/alert"
 	"github.com/nettact/server-core/cleanup"
@@ -99,6 +100,7 @@ type deps struct {
 	registry    *registry.Service
 	incidentops *incidentops.Service
 	cleanup     *cleanup.Service
+	agentalert  *agentalert.Engine
 	bus         *eventbus.Bus
 	hub         *agentws.Hub
 	ret         metrics.RetentionConfig
@@ -166,6 +168,15 @@ func startWorkers(w *workers, d deps) {
 			log.Printf("offline sweep: %v", err)
 		} else if n > 0 {
 			log.Printf("offline sweep: %d agent(s) marked offline", n)
+		}
+	})
+
+	// Agent connectivity-alert engine: the same live connected set the sweeper uses
+	// drives the offline/recovery state machine. It measures grace from the first
+	// tick an agent is seen absent, so a server restart never mass-fires alerts.
+	w.every(5*time.Second, func(ctx context.Context) {
+		if err := d.agentalert.Tick(ctx, d.hub.ConnectedIDs()); err != nil {
+			log.Printf("agent alert tick: %v", err)
 		}
 	})
 }
