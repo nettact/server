@@ -78,6 +78,14 @@ func (m *Manager) downloadAndInstall(ctx context.Context) error {
 		os.RemoveAll(tmpDir)
 		return errors.New("downloaded dist has no index.html")
 	}
+	// Write the marker into the extracted tree before the final rename so the
+	// UI and its version become visible atomically. A crash can therefore
+	// produce only a complete, matching install or an invalid install that the
+	// next start downloads again.
+	if err := os.WriteFile(filepath.Join(tmpDir, installedVersionFile), []byte(m.version), 0o644); err != nil {
+		os.RemoveAll(tmpDir)
+		return fmt.Errorf("write installed version: %w", err)
+	}
 
 	target := filepath.Join(m.dir, m.version)
 	// A stale partial install can only exist after a crash mid-rename chain; it

@@ -14,6 +14,13 @@ import (
 const (
 	defaultBaseURL = "https://github.com/nettact/web-console/releases/download"
 
+	// installedVersionFile records the exact web-console release installed in
+	// a version directory. The directory name alone is not trusted: an
+	// interrupted/manual copy can leave different UI bytes under the expected
+	// path. Installs without this marker are treated as stale and downloaded
+	// again.
+	installedVersionFile = ".installed-version"
+
 	// envBaseURL overrides the release download base URL (mirror / air-gapped
 	// deployments). Layout must match GitHub Releases: <base>/<tag>/<asset>.
 	envBaseURL = "NETTACT_WEBUI_BASE_URL"
@@ -30,7 +37,7 @@ const (
 
 // Manager owns the console UI lifecycle: it serves whatever is available now
 // (installed SPA, local dev dist, or the placeholder) and, when the stamped
-// version is missing on disk, downloads and installs it in the background.
+// version is missing or does not match its marker, downloads it in the background.
 type Manager struct {
 	dir     string // versions install to dir/<version>/
 	version string
@@ -80,7 +87,7 @@ func New(dir, version string) *Manager {
 	}
 
 	installed := filepath.Join(dir, version)
-	if version != "dev" && hasIndex(os.DirFS(installed)) {
+	if version != "dev" && isInstalledVersion(installed, version) {
 		m.store(spaHandler(os.DirFS(installed)))
 		m.started = true
 		return m
@@ -137,6 +144,17 @@ func (m *Manager) store(h http.Handler) {
 func hasIndex(fsys fs.FS) bool {
 	_, err := fs.Stat(fsys, "index.html")
 	return err == nil
+}
+
+// isInstalledVersion requires both a usable SPA and an exact version marker.
+// Older installs without a marker are deliberately invalidated once so the
+// binary's stamped WEB_CONSOLE_VERSION is guaranteed to match the served UI.
+func isInstalledVersion(dir, want string) bool {
+	if !hasIndex(os.DirFS(dir)) {
+		return false
+	}
+	got, err := os.ReadFile(filepath.Join(dir, installedVersionFile))
+	return err == nil && string(got) == want
 }
 
 // defaultBackoff doubles from 30s and caps at 10 minutes; the loop retries

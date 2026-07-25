@@ -139,6 +139,9 @@ func TestFreshInstallAndSwap(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, tag, "index.html")); err != nil {
 		t.Fatalf("installed index.html missing: %v", err)
 	}
+	if got, err := os.ReadFile(filepath.Join(dir, tag, installedVersionFile)); err != nil || string(got) != tag {
+		t.Fatalf("installed version = %q, %v; want %q", got, err, tag)
+	}
 }
 
 func TestAlreadyInstalledServesWithoutNetwork(t *testing.T) {
@@ -148,6 +151,9 @@ func TestAlreadyInstalledServesWithoutNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, tag, "index.html"), []byte("PREINSTALLED"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, tag, installedVersionFile), []byte(tag), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -165,6 +171,60 @@ func TestAlreadyInstalledServesWithoutNetwork(t *testing.T) {
 	}
 	if n := rel.requests.Load(); n != 0 {
 		t.Fatalf("made %d network requests; want 0", n)
+	}
+}
+
+func TestMismatchedOrMissingInstalledVersionDownloadsAgain(t *testing.T) {
+	const tag = "v0.2.0"
+	oldTag := "v0.1.0"
+	for _, tc := range []struct {
+		name   string
+		marker *string
+	}{
+		{name: "mismatched", marker: &oldTag},
+		{name: "missing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tarball, sum := buildDistTarGz(t, map[string]string{"index.html": "CURRENT"})
+			rel := &fakeRelease{tag: tag, tarball: tarball, sumsLine: sum + "  web-console-dist-" + tag + ".tar.gz"}
+			srv := httptest.NewServer(rel.handler())
+			defer srv.Close()
+
+			dir := t.TempDir()
+			installed := filepath.Join(dir, tag)
+			if err := os.MkdirAll(installed, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(installed, "index.html"), []byte("STALE"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.marker != nil {
+				if err := os.WriteFile(filepath.Join(installed, installedVersionFile), []byte(*tc.marker), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			m := newTestManager(t, dir, tag, srv.URL)
+			h := m.Handler()
+			if resp := get(t, h, "/"); resp.StatusCode != http.StatusServiceUnavailable {
+				t.Fatalf("stale install status = %d; want 503 before replacement", resp.StatusCode)
+			}
+
+			m.Start()
+			defer m.Close(context.Background())
+			waitFor(t, 5*time.Second, func() bool {
+				resp := get(t, h, "/")
+				return resp.StatusCode == http.StatusOK &&
+					bytes.Contains([]byte(body(t, resp)), []byte("CURRENT"))
+			})
+
+			if n := rel.requests.Load(); n != 2 {
+				t.Fatalf("made %d network requests; want checksum + tarball", n)
+			}
+			if got, err := os.ReadFile(filepath.Join(installed, installedVersionFile)); err != nil || string(got) != tag {
+				t.Fatalf("installed version = %q, %v; want %q", got, err, tag)
+			}
+		})
 	}
 }
 
