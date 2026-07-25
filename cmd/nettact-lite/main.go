@@ -27,10 +27,14 @@ import (
 	"golang.org/x/term"
 
 	"github.com/nettact/server-core/identity"
-	"github.com/nettact/server-core/metrics"
 	"github.com/nettact/server-core/store"
 	"github.com/nettact/server-lite/liteserver"
 )
+
+// maxAgents caps enrolled agents. Lite targets a home/SMB fleet well under this,
+// and the ceiling is a product decision rather than a deployment knob, so it is
+// fixed here instead of being exposed as a flag.
+const maxAgents = 50
 
 func main() {
 	// Subcommand dispatch before flag parsing: `passwd` runs its own FlagSet and
@@ -46,13 +50,6 @@ func main() {
 	dev := flag.Bool("dev", false, "dev mode: open CORS for the Vite origin, non-Secure cookie")
 	adminUser := flag.String("admin-user", "", "optional; first run only; if omitted an initial password is generated and printed")
 	adminPass := flag.String("admin-pass", "", "optional; first run only; if omitted an initial password is generated and printed")
-	maxAgents := flag.Int("max-agents", 50, "max enrolled agents (0 = unlimited)")
-	// Raw only serves chart reads of ranges ≤2h (longer ranges read the rollups),
-	// so its default is days, not weeks — at 1s probe intervals every extra raw
-	// day is GBs of SQLite.
-	retainRawDays := flag.Int("retain-raw-days", 2, "raw sample retention (days)")
-	retain1mDays := flag.Int("retain-1m-days", 30, "1-minute rollup retention (days)")
-	retain1hDays := flag.Int("retain-1h-days", 730, "1-hour rollup retention (days); 1-day rollups kept forever")
 	tlsCert := flag.String("tls-cert", "", "path to TLS certificate; with -tls-key serves HTTPS/WSS natively")
 	tlsKey := flag.String("tls-key", "", "path to TLS private key; with -tls-cert serves HTTPS/WSS natively")
 	// Browsers only send Secure cookies over HTTPS, so a Secure session cookie on a
@@ -105,13 +102,8 @@ func main() {
 		AdminPass:    *adminPass,
 		Dev:          *dev,
 		SecureCookie: secure,
-		MaxAgents:    *maxAgents,
-		Retention: metrics.RetentionConfig{
-			RawSeconds: int64(*retainRawDays) * 86400,
-			M1Seconds:  int64(*retain1mDays) * 86400,
-			H1Seconds:  int64(*retain1hDays) * 86400,
-			D1Seconds:  0, // 1-day rollups kept forever
-		},
+		MaxAgents:    maxAgents,
+		// Retention stays zero: liteserver fills in the standard windows.
 		// Desktop stays nil: standalone Lite exposes no one-time-login endpoint and
 		// keeps the default -addr :12450 bind.
 	})

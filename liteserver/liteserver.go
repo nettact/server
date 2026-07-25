@@ -187,16 +187,11 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	if cfg.Desktop != nil && cfg.Desktop.LoginTokenTTL == 0 {
 		cfg.Desktop.LoginTokenTTL = 2 * time.Minute
 	}
-	// A zero Retention selects the standard windows, so a caller (the desktop)
-	// need not import server-core just to fill them in. The standalone CLI always
-	// passes explicit values.
+	// A zero Retention selects the standard windows (raw 2d / 1m 30d / 1h 2y /
+	// 1d forever), which is what every caller uses — the windows are not
+	// configurable per deployment.
 	if cfg.Retention == (metrics.RetentionConfig{}) {
-		cfg.Retention = metrics.RetentionConfig{
-			RawSeconds: 2 * 86400,
-			M1Seconds:  30 * 86400,
-			H1Seconds:  730 * 86400,
-			D1Seconds:  0, // 1-day rollups kept forever
-		}
+		cfg.Retention = metrics.DefaultRetention()
 	}
 	if cfg.WebUIDir == "" {
 		cfg.WebUIDir = filepath.Join(filepath.Dir(cfg.DBPath), "webui")
