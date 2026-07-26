@@ -8,8 +8,6 @@ curl -fsSL https://d.nettact.org/install.sh | bash
 
 脚本源码位于 [`deploy/install.sh`](./deploy/install.sh)，完整说明见 [部署文档](../docs/deploy.md)。
 
-NetTact **自托管 Lite 服务端** —— 单二进制,把 [server-core](https://github.com/nettact/server-core) 模块装配在一个 SQLite 数据库上(架构 §7)。AGPL-3.0。
-
 运行:
 
 ```
