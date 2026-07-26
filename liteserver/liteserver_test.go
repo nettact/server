@@ -137,6 +137,13 @@ func TestDesktopStartLoginReplayShutdownAndRestart(t *testing.T) {
 	if !strings.HasPrefix(second.BaseURL(), "http://127.0.0.1:") {
 		t.Fatalf("restart BaseURL = %q", second.BaseURL())
 	}
+	// The restart lands on a different ephemeral port, so the loopback origin the
+	// first launch seeded is now stale and must be refreshed rather than left
+	// pointing at a dead port.
+	stored, err = second.setSvc.Get(context.Background(), settings.KeyConsoleBaseURL)
+	if err != nil || stored != second.BaseURL() {
+		t.Fatalf("console_base_url after restart = %q, %v; want %q", stored, err, second.BaseURL())
+	}
 }
 
 // TestStandaloneStartWithoutCredentials covers the first-run auto-generate path:

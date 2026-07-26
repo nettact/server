@@ -20,8 +20,10 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -93,9 +95,10 @@ type Config struct {
 	Retention metrics.RetentionConfig // downsampling/retention windows
 
 	// Desktop, when non-nil, enables the desktop-only surface: the
-	// GET /desktop/login one-time-token endpoint and per-launch console_base_url
-	// rewrite. It also tightens Addr validation to a loopback literal with no
-	// TLS. nil means standalone — none of that surface exists.
+	// GET /desktop/login one-time-token endpoint and the console_base_url seed
+	// (written only when unset or still loopback-valued). It also tightens Addr
+	// validation to a loopback literal with no TLS. nil means standalone — none
+	// of that surface exists.
 	Desktop *DesktopConfig
 }
 
@@ -174,6 +177,59 @@ func resolveListenAddr(ctx context.Context, set *settings.Service, cfg Config) l
 		return listenResolution{addr: cfg.Addr, source: flagOrDefault}
 	}
 	return listenResolution{addr: v, source: "db"}
+}
+
+// baseOrigin derives the server's own dialable origin from the bound listener
+// address. A wildcard bind reports an unspecified host — 0.0.0.0 or, dual-stack,
+// [::] — which is valid to bind but useless to dial, so only that case is
+// rewritten to 127.0.0.1 (a wildcard listener always accepts loopback). Any
+// specific bound host — 127.0.0.1, [::1], a LAN interface — is preserved: it is
+// the one address known to reach this listener, and an IPv6-only or single-
+// interface bind would not answer on IPv4 loopback at all.
+func baseOrigin(scheme string, bound net.Addr) string {
+	if tcp, ok := bound.(*net.TCPAddr); ok && tcp.IP.IsUnspecified() {
+		return scheme + "://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(tcp.Port))
+	}
+	return scheme + "://" + bound.String()
+}
+
+// effectiveAddr reports the binding the way it was configured: the configured
+// host paired with the port actually bound. Reporting the socket's own address
+// instead would surface a dual-stack wildcard as "[::]:12450" — which no longer
+// matches the saved "0.0.0.0:12450", so the console would show a permanent
+// "restart pending" badge and parse the host back as loopback. Taking the port
+// from the socket keeps an OS-assigned (":0") or fallback bind honest.
+func effectiveAddr(configured string, bound net.Addr) string {
+	host, _, err := net.SplitHostPort(configured)
+	if err != nil || host == "" {
+		return bound.String()
+	}
+	_, port, err := net.SplitHostPort(bound.String())
+	if err != nil {
+		return bound.String()
+	}
+	return net.JoinHostPort(host, port)
+}
+
+// isLoopbackOrigin reports whether v is an origin that only resolves on this
+// machine. Such a value can only be one this package seeded (or an equivalent
+// the user typed), so it is safe to refresh; anything else is a deliberate
+// choice — a LAN address, a hostname, a reverse proxy — and must be preserved.
+// A value that is not a parsable absolute URL is treated as user-authored.
+func isLoopbackOrigin(v string) bool {
+	u, err := url.Parse(v)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // Start brings the server fully up and returns it ready. ctx bounds only the
@@ -466,7 +522,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		SecureCookie: cfg.SecureCookie,
 		ListenStatus: func(context.Context) *api.ListenStatus {
 			return &api.ListenStatus{
-				EffectiveAddr: s.ln.Addr().String(),
+				EffectiveAddr: effectiveAddr(s.listen.addr, s.ln.Addr()),
 				Source:        s.listen.source,
 				Desktop:       cfg.Desktop != nil,
 				FallbackFrom:  s.listen.fallbackFrom,
@@ -519,24 +575,34 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	if cfg.TLSCert != "" {
 		scheme = "https"
 	}
-	s.baseURL = scheme + "://" + ln.Addr().String()
+	// A wildcard bind must not leak into URLs: a browser sent to
+	// http://[::]:12450 goes nowhere. baseOrigin rewrites only that case to
+	// 127.0.0.1 (which the desktop's tray login relies on — its binds are always
+	// 127.0.0.1 or 0.0.0.0, so its base URL is always loopback) and preserves any
+	// specific bound host, which is the only reachable origin for an IPv6- or
+	// interface-scoped standalone listener.
+	s.baseURL = baseOrigin(scheme, ln.Addr())
 
 	s.httpSrv = &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	// In desktop mode the bound port can change (a saved listen setting, or a
-	// fallback after a failed bind), so rewrite the deep-link origin whenever it
-	// differs. A loopback-only bind makes any previously stored LAN URL
-	// unreachable anyway, so force-overwrite is always correct here.
+	// In desktop mode seed the deep-link origin so notifications have somewhere to
+	// point on a fresh install, and keep an auto-seeded one in step with the bound
+	// port (which moves when a saved listen setting or a bind fallback changes it).
+	// A value the user configured — a LAN address, a hostname, a reverse proxy —
+	// is the one thing a notification recipient can actually open from another
+	// machine, so it is never touched; only an empty or loopback value, which can
+	// only have come from this seed (or an equivalent the user typed), is written.
 	if cfg.Desktop != nil {
-		if cur, _ := settingsSvc.Get(ctx, settings.KeyConsoleBaseURL); cur != s.baseURL {
+		cur, _ := settingsSvc.Get(ctx, settings.KeyConsoleBaseURL)
+		if (cur == "" || isLoopbackOrigin(cur)) && cur != s.baseURL {
 			if err := settingsSvc.Set(ctx, settings.KeyConsoleBaseURL, s.baseURL); err != nil {
-				// The deep-link origin must match this launch's ephemeral port or tray
-				// notifications would open a dead port. This is part of readiness, so
-				// fail Start and clean up the listener/workers (the ok=false defer
-				// closes the DB) rather than claim readiness with a stale deep link.
+				// A deep-link origin that never got written (or still names a dead port)
+				// sends every notification recipient nowhere. This is part of readiness,
+				// so fail Start and clean up the listener/workers (the ok=false defer
+				// closes the DB) rather than claim readiness with a broken deep link.
 				w.stop(context.Background())
 				_ = ln.Close()
 				return nil, fmt.Errorf("persist console_base_url: %w", err)
@@ -564,7 +630,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	}()
 
 	log.Printf("nettact-lite listening on %s (dev=%v, db=%s, max_agents=%d, desktop=%v, webui=%s@%s)",
-		s.baseURL, cfg.Dev, cfg.DBPath, cfg.MaxAgents, cfg.Desktop != nil, webui.Version, cfg.WebUIDir)
+		ln.Addr(), cfg.Dev, cfg.DBPath, cfg.MaxAgents, cfg.Desktop != nil, webui.Version, cfg.WebUIDir)
 
 	// Nothing can fail Start past this point, so the background download loop
 	// will always be paired with a Shutdown that closes it.
@@ -574,9 +640,31 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	return s, nil
 }
 
-// BaseURL is the server's own origin with the actual bound port, e.g.
-// http://127.0.0.1:52344. Deep links and the agent's ServerURL derive from it.
+// BaseURL is the server's own dialable origin: the bound host and actual port,
+// with a wildcard bind reported as 127.0.0.1 (e.g. http://127.0.0.1:52344 for a
+// 0.0.0.0 bind). On the desktop — whose binds are always 127.0.0.1 or 0.0.0.0 —
+// it is therefore always loopback: what the tray opens locally (the one-time
+// login URL) and what seeds console_base_url. Use ConsoleBaseURL for anything a
+// person on another machine has to open.
 func (s *Server) BaseURL() string { return s.baseURL }
+
+// ListenFallbackFrom reports the saved listen address that failed to bind on
+// this launch ("" when the server is on its configured address). The desktop
+// host checks it after a listen-change restart: a fallback means the address
+// the user just saved is NOT in effect, so the "console is now at X"
+// notification must not claim it is.
+func (s *Server) ListenFallbackFrom() string { return s.listen.fallbackFrom }
+
+// ConsoleBaseURL is the origin to send someone to reach this console — the
+// console_base_url setting, which the user can point at a LAN address, hostname,
+// or reverse proxy. It falls back to the loopback BaseURL when unset. Notification
+// deep links read the same setting through server-core.
+func (s *Server) ConsoleBaseURL(ctx context.Context) string {
+	if v := s.setSvc.ConsoleBaseURL(ctx); v != "" {
+		return v
+	}
+	return s.baseURL
+}
 
 // Err delivers a terminal serve error if the HTTP server stops on its own (not
 // via Shutdown). It never sends a value for a clean Shutdown. At most one value
