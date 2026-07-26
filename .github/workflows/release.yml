@@ -36,6 +36,8 @@ jobs:
     name: Test · build · publish
     runs-on: ubuntu-latest
     environment: release          # manual-approval gate
+    outputs:
+      is_latest: ${{ steps.rel.outputs.is_latest }}
     permissions:
       contents: write             # GitHub Release
       packages: write             # push to GHCR
@@ -186,6 +188,7 @@ jobs:
             dist-bins/nettact-lite-linux-amd64
             dist-bins/nettact-lite-linux-arm64
             dist-bins/SHA256SUMS
+            server-lite/deploy/install.sh
           body: |
             ## nettact-lite ${{ inputs.tag || github.ref_name }}
 
@@ -199,3 +202,58 @@ jobs:
             docker pull ghcr.io/${{ github.repository_owner }}/nettact-lite:${{ inputs.tag || github.ref_name }}
             ```
             Verify binary integrity with `sha256sum -c SHA256SUMS`.
+
+  publish-installer-r2:
+    name: Publish installer to R2
+    runs-on: ubuntu-latest
+    needs: release
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      PUBLIC_URL: https://d.nettact.org/install.sh
+      R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Validate R2 configuration
+        run: |
+          set -euo pipefail
+          : "${R2_ACCOUNT_ID:?Set the R2_ACCOUNT_ID repository variable}"
+          : "${R2_BUCKET:?Set the R2_BUCKET repository variable}"
+          : "${AWS_ACCESS_KEY_ID:?Set the R2_ACCESS_KEY_ID repository secret}"
+          : "${AWS_SECRET_ACCESS_KEY:?Set the R2_SECRET_ACCESS_KEY repository secret}"
+
+      - name: Download installer asset
+        run: |
+          set -euo pipefail
+          mkdir -p dist-out
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir dist-out --pattern 'install.sh'
+          test -f dist-out/install.sh
+          bash -n dist-out/install.sh
+
+      - name: Publish immutable version path
+        run: |
+          set -euo pipefail
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          aws s3 cp dist-out/install.sh "s3://${R2_BUCKET}/server-lite/$TAG/install.sh" --endpoint-url "$endpoint" --no-progress --only-show-errors --cache-control 'public, max-age=31536000, immutable' --content-type 'text/x-shellscript'
+
+      - name: Publish latest installer
+        if: needs.release.outputs.is_latest == 'true'
+        run: |
+          set -euo pipefail
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          aws s3 cp dist-out/install.sh "s3://${R2_BUCKET}/install.sh" --endpoint-url "$endpoint" --no-progress --only-show-errors --cache-control 'public, max-age=300' --content-type 'text/x-shellscript'
+
+      - name: Publish download summary
+        run: |
+          {
+            echo "## R2 installer"
+            echo
+            echo "- Version: $TAG"
+            echo "- Latest stable: $PUBLIC_URL"
+            echo "- Versioned: https://d.nettact.org/server-lite/$TAG/install.sh"
+          } >> "$GITHUB_STEP_SUMMARY"
