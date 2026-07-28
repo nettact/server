@@ -15,6 +15,7 @@ import (
 
 	"github.com/nettact/server-core/identity"
 	"github.com/nettact/server-core/settings"
+	"github.com/nettact/server-core/store/storetest"
 )
 
 func startDesktopTestServer(t *testing.T, dbPath string, ttl time.Duration) *Server {
@@ -39,7 +40,7 @@ func startDesktopTestServer(t *testing.T, dbPath string, ttl time.Duration) *Ser
 }
 
 func TestDesktopStartLoginReplayShutdownAndRestart(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "desktop.db")
+	dbPath := filepath.Join(storetest.Dir(t), "desktop.db")
 	srv := startDesktopTestServer(t, dbPath, time.Minute)
 
 	u, err := url.Parse(srv.BaseURL())
@@ -152,7 +153,7 @@ func TestDesktopStartLoginReplayShutdownAndRestart(t *testing.T) {
 // second Start on the same DB must succeed against the existing admin without
 // any credentials.
 func TestStandaloneStartWithoutCredentials(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "standalone.db")
+	dbPath := filepath.Join(storetest.Dir(t), "standalone.db")
 	srv, err := Start(context.Background(), Config{
 		Addr:      "127.0.0.1:0",
 		DBPath:    dbPath,
@@ -270,7 +271,7 @@ func TestRootServesWebUIPlaceholderInDevBuild(t *testing.T) {
 	// webui.Version is "dev" under test, so the manager must serve the built-in
 	// placeholder without any network access — this keeps go test offline-safe
 	// in every CI gate.
-	srv := startDesktopTestServer(t, filepath.Join(t.TempDir(), "webui.db"), time.Minute)
+	srv := startDesktopTestServer(t, filepath.Join(storetest.Dir(t), "webui.db"), time.Minute)
 
 	resp, err := http.Get(srv.BaseURL() + "/") //nolint:gosec // loopback test server
 	if err != nil {

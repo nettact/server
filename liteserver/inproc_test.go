@@ -14,13 +14,14 @@ import (
 	"github.com/nettact/protocol/permission"
 	"github.com/nettact/protocol/telemetry"
 	"github.com/nettact/protocol/wire"
+	"github.com/nettact/server-core/store/storetest"
 )
 
 // TestInProcessEnrollAndDial proves the desktop in-memory path end to end at the
 // liteserver boundary: mint a token, EnrollAgent directly (no HTTP), then
 // DialAgent (no WebSocket) and run the full Hello→DesiredState→Packet→Ack flow.
 func TestInProcessEnrollAndDial(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "inproc.db")
+	dbPath := filepath.Join(storetest.Dir(t), "inproc.db")
 	srv := startDesktopTestServer(t, dbPath, time.Minute)
 	ctx := context.Background()
 

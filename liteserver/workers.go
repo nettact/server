@@ -8,13 +8,14 @@ import (
 
 	"github.com/nettact/server-core/agentalert"
 	"github.com/nettact/server-core/agentws"
-	"github.com/nettact/server-core/alert"
 	"github.com/nettact/server-core/cleanup"
 	"github.com/nettact/server-core/eventbus"
+	"github.com/nettact/server-core/fault"
 	"github.com/nettact/server-core/identity"
 	"github.com/nettact/server-core/incidentops"
 	"github.com/nettact/server-core/ingest"
 	"github.com/nettact/server-core/metrics"
+	"github.com/nettact/server-core/notifypolicy"
 	"github.com/nettact/server-core/registry"
 )
 
@@ -94,16 +95,17 @@ func (w *workers) stop(ctx context.Context) bool {
 
 // deps bundles the services the periodic and event-driven workers need.
 type deps struct {
-	metrics     *metrics.Store
-	ingest      *ingest.Service
-	identity    *identity.Service
-	registry    *registry.Service
-	incidentops *incidentops.Service
-	cleanup     *cleanup.Service
-	agentalert  *agentalert.Engine
-	bus         *eventbus.Bus
-	hub         *agentws.Hub
-	ret         metrics.RetentionConfig
+	metrics      *metrics.Store
+	ingest       *ingest.Service
+	identity     *identity.Service
+	registry     *registry.Service
+	incidentops  *incidentops.Service
+	cleanup      *cleanup.Service
+	agentalert   *agentalert.Engine
+	notifypolicy *notifypolicy.Service
+	bus          *eventbus.Bus
+	hub          *agentws.Hub
+	ret          metrics.RetentionConfig
 }
 
 func startWorkers(w *workers, d deps) {
@@ -171,12 +173,25 @@ func startWorkers(w *workers, d deps) {
 		}
 	})
 
-	// Agent connectivity-alert engine: the same live connected set the sweeper uses
-	// drives the offline/recovery state machine. It measures grace from the first
-	// tick an agent is seen absent, so a server restart never mass-fires alerts.
+	// Agent liveness detector: the same live connected set the sweeper uses drives
+	// the offline/recovery state machine. It measures grace from the first tick an
+	// agent is seen absent, so a server restart never mass-confirms offline faults.
 	w.every(5*time.Second, func(ctx context.Context) {
 		if err := d.agentalert.Tick(ctx, d.hub.ConnectedIDs()); err != nil {
-			log.Printf("agent alert tick: %v", err)
+			log.Printf("agent liveness tick: %v", err)
+		}
+	})
+
+	// Notification delivery: send everything whose policy delay has expired. The
+	// short interval keeps the delay honest without polling hard, and restart
+	// recovery is implicit — a delivery's due_at is an absolute time, so one that
+	// came due while the server was down is simply overdue on the first tick.
+	w.every(3*time.Second, func(ctx context.Context) {
+		if d.notifypolicy == nil {
+			return
+		}
+		if err := d.notifypolicy.Tick(ctx); err != nil {
+			log.Printf("notification delivery tick: %v", err)
 		}
 	})
 }
@@ -204,26 +219,26 @@ func wireIncidentOps(w *workers, bus *eventbus.Bus, io *incidentops.Service) {
 			log.Printf("incidentops: incident-opened snapshot dispatch (%s): %v", ev.IncidentID, err)
 		}
 	})
-	// Evidence added -> single-flight traceroute trigger for the detecting Agent of
+	// Fault confirmed -> single-flight traceroute trigger for the detecting Agent of
 	// an eligible network-availability fault.
-	bus.Subscribe(eventbus.TopicEvidenceAdded, func(m eventbus.Message) {
-		ev, ok := m.Payload.(eventbus.EvidenceAdded)
+	bus.Subscribe(eventbus.TopicFaultConfirmed, func(m eventbus.Message) {
+		ev, ok := m.Payload.(fault.SignalEvent)
 		if !ok {
 			return
 		}
-		if err := io.OnEvidence(w.ctx, ev); err != nil {
-			log.Printf("incidentops: evidence-added trace trigger (%s): %v", ev.EvidenceID, err)
+		if err := io.OnSignalConfirmed(w.ctx, ev); err != nil {
+			log.Printf("incidentops: fault-confirmed trace trigger (%s): %v", ev.SignalID, err)
 		}
 	})
-	// Alert resolved -> deactivate the trace references it held and close any cohort
+	// Fault resolved -> deactivate the trace references it held and close any cohort
 	// whose active reference count fell to zero (the execution itself is untouched).
-	bus.Subscribe(eventbus.TopicAlertResolved, func(m eventbus.Message) {
-		ev, ok := m.Payload.(alert.Raised)
+	bus.Subscribe(eventbus.TopicFaultResolved, func(m eventbus.Message) {
+		ev, ok := m.Payload.(fault.SignalEvent)
 		if !ok {
 			return
 		}
-		if err := io.OnAlertResolved(w.ctx, ev.ID); err != nil {
-			log.Printf("incidentops: alert-resolved refs (%s): %v", ev.ID, err)
+		if err := io.OnSignalResolved(w.ctx, ev.SignalID); err != nil {
+			log.Printf("incidentops: fault-resolved refs (%s): %v", ev.SignalID, err)
 		}
 	})
 }

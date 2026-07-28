@@ -32,12 +32,12 @@ import (
 	"github.com/nettact/server-core/agentalert"
 	"github.com/nettact/server-core/agentstatus"
 	"github.com/nettact/server-core/agentws"
-	"github.com/nettact/server-core/alert"
 	"github.com/nettact/server-core/api"
 	"github.com/nettact/server-core/audit"
 	"github.com/nettact/server-core/cleanup"
 	"github.com/nettact/server-core/config"
 	"github.com/nettact/server-core/eventbus"
+	"github.com/nettact/server-core/fault"
 	"github.com/nettact/server-core/hostlive"
 	"github.com/nettact/server-core/identity"
 	"github.com/nettact/server-core/incident"
@@ -46,9 +46,9 @@ import (
 	"github.com/nettact/server-core/inventory"
 	"github.com/nettact/server-core/metrics"
 	"github.com/nettact/server-core/notification"
+	"github.com/nettact/server-core/notifypolicy"
 	"github.com/nettact/server-core/opissue"
 	"github.com/nettact/server-core/registry"
-	"github.com/nettact/server-core/rules"
 	"github.com/nettact/server-core/settings"
 	"github.com/nettact/server-core/site"
 	"github.com/nettact/server-core/sse"
@@ -114,9 +114,9 @@ type DesktopConfig struct {
 	// in response; without it a saved change waits for the next launch.
 	OnListenAddrChanged func(newAddr string)
 
-	// OnAlertsChanged, when non-nil, fires from a background goroutine after an
-	// alert is raised or resolved. The desktop refreshes its tray summary.
-	OnAlertsChanged func()
+	// OnIncidentsChanged, when non-nil, fires from a background goroutine after an
+	// incident opens or resolves. The desktop refreshes its tray summary.
+	OnIncidentsChanged func()
 }
 
 // Server is a running Lite server. It owns the listener, HTTP server, agent hub,
@@ -134,12 +134,12 @@ type Server struct {
 	workers  *workers
 	webui    *webui.Manager
 
-	idSvc    *identity.Service
-	regSvc   *registry.Service
-	setSvc   *settings.Service
-	auditSvc *audit.Service
-	alertSvc *alert.Service
-	adminID  string
+	idSvc       *identity.Service
+	regSvc      *registry.Service
+	setSvc      *settings.Service
+	auditSvc    *audit.Service
+	incidentSvc *incident.Service
+	adminID     string
 
 	login *loginTokens // nil unless Desktop != nil
 
@@ -299,7 +299,6 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	metricsStore := metrics.New(db)
 	settingsSvc := settings.New(db)
 	notifSvc := notification.New(db)
-	alertSvc := alert.New(db)
 
 	// Incident snapshot + traceroute orchestration. Constructed before the fault
 	// engine (which uses it as the synchronous incident-base snapshot writer) and
@@ -307,14 +306,25 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	// exists, below, closing the construction cycle without an import cycle.
 	incidentOps := incidentops.New(db, metricsStore, settingsSvc, bus)
 
-	// Fault engine: evaluates group rules, maintains alerts/incidents, writes the
-	// immutable incident base snapshot inside its open transaction (via incidentOps),
-	// dispatches notifications, and publishes lifecycle events post-commit.
-	rulesSvc := rules.New(db, metricsStore, notifSvc, settingsSvc, bus, incidentOps)
+	// Fault engine: runs the built-in detectors round by round, maintains fault
+	// signals and incidents, writes the immutable incident base snapshot inside its
+	// open transaction (via incidentOps), and publishes lifecycle events
+	// post-commit. It records faults; it never sends anything.
+	faultSvc := fault.New(db, bus, incidentOps)
 
-	// Config force-resolves alerts of removed targets/rules through the fault engine
-	// (AlertTerminator), so it takes rulesSvc rather than the alert read model.
-	cfgSvc := config.New(db, reg, bus, rulesSvc)
+	// Notification policy decides whether/when/where a recorded fault is
+	// announced. It reads incidents the fault engine writes, so it is constructed
+	// after and injected back as the engine's planner — the two never import each
+	// other.
+	policySvc := notifypolicy.New(db, notifSvc, settingsSvc, bus)
+	faultSvc.SetPlanner(policySvc)
+	if _, err := policySvc.EnsureDefault(ctx, site.DefaultSiteID); err != nil {
+		log.Printf("ensure default notification policy: %v", err)
+	}
+
+	// Config force-resolves the faults of removed/changed targets through the fault
+	// engine (FaultTerminator).
+	cfgSvc := config.New(db, reg, bus, faultSvc)
 	// The site's undeletable default monitor group must exist before the console
 	// (or the first-run onboarding wizard) writes targets. Starter-target creation
 	// is owned by the wizard now, so first boot leaves an empty target list.
@@ -324,20 +334,22 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 
 	auditSvc := audit.New(db)
 	invSvc := inventory.New(db)
-	// Ingest evaluates rules inside its own sample transaction (atomic telemetry +
-	// rule-state visibility), so it takes the fault engine as its Evaluator.
-	ing := ingest.New(db, bus, metricsStore, rulesSvc)
+	// Ingest evaluates the batch's probe rounds inside its own sample transaction
+	// (atomic telemetry + detector state), so it takes the fault engine as its
+	// Evaluator.
+	ing := ingest.New(db, bus, metricsStore, faultSvc)
 	hostLive := hostlive.New()
 	opSvc := opissue.New(db, bus)
 	incidentSvc := incident.New(db)
 	// Authoritative current target-status aggregation (read-time; owns no state).
-	tgtStatusSvc := targetstatus.New(db)
+	tgtStatusSvc := targetstatus.New(db, metricsStore)
 
 	// Agent status list (AGENT-001): per-agent health + resource rollup (read-time).
 	agentStatusSvc := agentstatus.New(db, metricsStore, settingsSvc)
-	// Agent connectivity-alert engine (AGENT-002): offline/recovery state machine,
-	// driven by a worker tick fed the live connected-session set.
-	agentAlertEng := agentalert.New(db, settingsSvc, notifSvc, bus)
+	// Agent liveness detector (AGENT-002): offline/recovery state machine, driven
+	// by a worker tick fed the live connected-session set. It records through the
+	// fault engine like every other detector.
+	agentAlertEng := agentalert.New(db, settingsSvc, faultSvc, bus)
 
 	// History-data cleanup: durable async delete jobs over the metrics store,
 	// driven by a worker tick and recovered after a restart.
@@ -382,8 +394,22 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 			Data: agentStatusEventData(ev.SiteID),
 		})
 	})
-	// Agent-status list also refreshes on a connectivity-alert open/resolve, and on
-	// rule-alert / operational-issue changes (they drive an agent's abnormal state
+	// Incident lifecycle drives the fault centre, so bridge all three topics to one
+	// event the console listens on to refetch the list it is showing.
+	incidentBridge := func(m eventbus.Message) {
+		if ev, ok := m.Payload.(eventbus.IncidentEvent); ok {
+			broker.Notify(ev.SiteID, sse.Event{
+				Name: sse.EventIncidentChanged,
+				Data: incidentEventData(ev.SiteID, ev.IncidentID),
+			})
+		}
+	}
+	bus.Subscribe(eventbus.TopicIncidentOpened, incidentBridge)
+	bus.Subscribe(eventbus.TopicIncidentUpdated, incidentBridge)
+	bus.Subscribe(eventbus.TopicIncidentResolved, incidentBridge)
+
+	// Agent-status list also refreshes on a connectivity-fault open/resolve, and on
+	// target-fault / operational-issue changes (they drive an agent's abnormal state
 	// and reason counts). The client coalesces these into one wholesale refetch.
 	agentStatusBridge := func(siteID string) {
 		broker.Notify(siteID, sse.Event{Name: sse.EventAgentStatusChanged, Data: agentStatusEventData(siteID)})
@@ -393,16 +419,13 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 			agentStatusBridge(ev.SiteID)
 		}
 	})
-	bus.Subscribe(eventbus.TopicAlertRaised, func(m eventbus.Message) {
-		if ev, ok := m.Payload.(alert.Raised); ok {
+	faultBridge := func(m eventbus.Message) {
+		if ev, ok := m.Payload.(fault.SignalEvent); ok {
 			agentStatusBridge(ev.SiteID)
 		}
-	})
-	bus.Subscribe(eventbus.TopicAlertResolved, func(m eventbus.Message) {
-		if ev, ok := m.Payload.(alert.Raised); ok {
-			agentStatusBridge(ev.SiteID)
-		}
-	})
+	}
+	bus.Subscribe(eventbus.TopicFaultConfirmed, faultBridge)
+	bus.Subscribe(eventbus.TopicFaultResolved, faultBridge)
 	bus.Subscribe(eventbus.TopicIssueChanged, func(m eventbus.Message) {
 		if ev, ok := m.Payload.(eventbus.IssueChanged); ok {
 			agentStatusBridge(ev.SiteID)
@@ -452,22 +475,24 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	}
 
 	startWorkers(w, deps{
-		metrics:     metricsStore,
-		ingest:      ing,
-		identity:    idSvc,
-		registry:    reg,
-		incidentops: incidentOps,
-		cleanup:     cleanupSvc,
-		agentalert:  agentAlertEng,
-		bus:         bus,
-		hub:         agentHub,
-		ret:         cfg.Retention,
+		metrics:      metricsStore,
+		ingest:       ing,
+		identity:     idSvc,
+		registry:     reg,
+		incidentops:  incidentOps,
+		cleanup:      cleanupSvc,
+		agentalert:   agentAlertEng,
+		notifypolicy: policySvc,
+		bus:          bus,
+		hub:          agentHub,
+		ret:          cfg.Retention,
 	})
-	// Desktop tray summary: alert lifecycle changes kick an immediate refresh.
-	if cfg.Desktop != nil && cfg.Desktop.OnAlertsChanged != nil {
-		onAlerts := func(eventbus.Message) { go cfg.Desktop.OnAlertsChanged() }
-		bus.Subscribe(eventbus.TopicAlertRaised, onAlerts)
-		bus.Subscribe(eventbus.TopicAlertResolved, onAlerts)
+	// Desktop tray summary: incident lifecycle changes kick an immediate refresh.
+	// The tray counts incidents, not signals, so it matches the fault centre.
+	if cfg.Desktop != nil && cfg.Desktop.OnIncidentsChanged != nil {
+		onIncidents := func(eventbus.Message) { go cfg.Desktop.OnIncidentsChanged() }
+		bus.Subscribe(eventbus.TopicIncidentOpened, onIncidents)
+		bus.Subscribe(eventbus.TopicIncidentResolved, onIncidents)
 	}
 
 	webuiMgr := webui.New(cfg.WebUIDir, webui.Version)
@@ -479,19 +504,19 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	// s is allocated before the router because the api Deps closures read it
 	// (lazily, at request time — well after Start has filled ln/baseURL/listen).
 	s := &Server{
-		cfg:      cfg,
-		db:       db,
-		agentHub: agentHub,
-		broker:   broker,
-		workers:  w,
-		webui:    webuiMgr,
-		idSvc:    idSvc,
-		regSvc:   reg,
-		setSvc:   settingsSvc,
-		auditSvc: auditSvc,
-		alertSvc: alertSvc,
-		adminID:  admin.ID,
-		errCh:    make(chan error, 1),
+		cfg:         cfg,
+		db:          db,
+		agentHub:    agentHub,
+		broker:      broker,
+		workers:     w,
+		webui:       webuiMgr,
+		idSvc:       idSvc,
+		regSvc:      reg,
+		setSvc:      settingsSvc,
+		auditSvc:    auditSvc,
+		incidentSvc: incidentSvc,
+		adminID:     admin.ID,
+		errCh:       make(chan error, 1),
 	}
 
 	apiDeps := api.Deps{
@@ -502,8 +527,8 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		Config:       cfgSvc,
 		Site:         siteSvc,
 		Inventory:    invSvc,
-		Rules:        rulesSvc,
-		Alert:        alertSvc,
+		Fault:        faultSvc,
+		NotifyPolicy: policySvc,
 		Incident:     incidentSvc,
 		IncidentOps:  incidentOps,
 		Notification: notifSvc,
@@ -672,10 +697,12 @@ func (s *Server) ConsoleBaseURL(ctx context.Context) string {
 // Shutdown), so a lifetime watcher blocked on receive always unblocks.
 func (s *Server) Err() <-chan error { return s.errCh }
 
-// ActiveAlertCount reports the default site's firing alert count, consumed
-// in-process by the desktop tray summary.
-func (s *Server) ActiveAlertCount(ctx context.Context) (int, error) {
-	return s.alertSvc.CountActive(ctx, site.DefaultSiteID)
+// OpenIncidentCount reports the default site's open incident count, consumed
+// in-process by the desktop tray summary. It counts incidents rather than fault
+// signals so the tray badge and the fault centre always show the same number of
+// the same thing.
+func (s *Server) OpenIncidentCount(ctx context.Context) (int, error) {
+	return s.incidentSvc.CountOpen(ctx, site.DefaultSiteID)
 }
 
 // MintEnrollmentToken issues a one-time enrollment token for the default site,
@@ -758,6 +785,17 @@ func agentStatusEventData(siteID string) []byte {
 	data, err := json.Marshal(map[string]any{"site_id": siteID})
 	if err != nil {
 		return []byte(`{"site_id":""}`)
+	}
+	return data
+}
+
+// incidentEventData marshals the "incident.changed" SSE payload: the affected
+// site plus the incident id, so a console with that incident's detail open can
+// refresh exactly it while the list refetches wholesale.
+func incidentEventData(siteID, incidentID string) []byte {
+	data, err := json.Marshal(map[string]any{"site_id": siteID, "incident_id": incidentID})
+	if err != nil {
+		return []byte(`{"site_id":"","incident_id":""}`)
 	}
 	return data
 }

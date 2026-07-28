@@ -12,6 +12,7 @@ import (
 
 	"github.com/nettact/server-core/settings"
 	"github.com/nettact/server-core/store"
+	"github.com/nettact/server-core/store/storetest"
 )
 
 // seedListenAddr writes a listen_addr setting into a (possibly new) DB before
@@ -43,7 +44,7 @@ func freePort(t *testing.T) string {
 }
 
 func TestListenAddrResolvedFromDB(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "listen-db.db")
+	dbPath := filepath.Join(storetest.Dir(t), "listen-db.db")
 	want := freePort(t)
 	seedListenAddr(t, dbPath, want)
 
@@ -73,7 +74,7 @@ func TestListenAddrResolvedFromDB(t *testing.T) {
 }
 
 func TestListenAddrFallbackWhenDBAddrUnbindable(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "listen-fallback.db")
+	dbPath := filepath.Join(storetest.Dir(t), "listen-fallback.db")
 	// Occupy a port and seed it as the configured address.
 	busy, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -116,7 +117,7 @@ func TestStartReturnsErrListenWhenFallbackUnbindable(t *testing.T) {
 
 	_, err = Start(context.Background(), Config{
 		Addr:      busy.Addr().String(),
-		DBPath:    filepath.Join(t.TempDir(), "listen-busy.db"),
+		DBPath:    filepath.Join(storetest.Dir(t), "listen-busy.db"),
 		AdminUser: "admin",
 		AdminPass: "test-password",
 		MaxAgents: 5,
@@ -131,7 +132,7 @@ func TestStartReturnsErrListenWhenFallbackUnbindable(t *testing.T) {
 }
 
 func TestDesktopListenChangeFiresCallback(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "listen-cb.db")
+	dbPath := filepath.Join(storetest.Dir(t), "listen-cb.db")
 	changed := make(chan string, 1)
 	srv, err := Start(context.Background(), Config{
 		Addr:      "127.0.0.1:0",

@@ -9,6 +9,7 @@ import (
 
 	"github.com/nettact/server-core/settings"
 	"github.com/nettact/server-core/store"
+	"github.com/nettact/server-core/store/storetest"
 )
 
 // seedConsoleBaseURL writes a console_base_url setting into a (possibly new) DB
@@ -45,7 +46,7 @@ func TestConsoleBaseURLSeedAndPreserve(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("user value preserved", func(t *testing.T) {
-		dbPath := filepath.Join(t.TempDir(), "console-user.db")
+		dbPath := filepath.Join(storetest.Dir(t), "console-user.db")
 		const lan = "http://192.168.1.9:12450"
 		seedConsoleBaseURL(t, dbPath, lan)
 
@@ -62,7 +63,7 @@ func TestConsoleBaseURLSeedAndPreserve(t *testing.T) {
 	})
 
 	t.Run("stale loopback seed refreshed", func(t *testing.T) {
-		dbPath := filepath.Join(t.TempDir(), "console-stale.db")
+		dbPath := filepath.Join(storetest.Dir(t), "console-stale.db")
 		// A seed from an earlier launch whose port is long gone.
 		seedConsoleBaseURL(t, dbPath, "http://127.0.0.1:59999")
 
@@ -73,7 +74,7 @@ func TestConsoleBaseURLSeedAndPreserve(t *testing.T) {
 	})
 
 	t.Run("seeded when unset and falls back when cleared", func(t *testing.T) {
-		dbPath := filepath.Join(t.TempDir(), "console-seed.db")
+		dbPath := filepath.Join(storetest.Dir(t), "console-seed.db")
 		srv := startDesktopTestServer(t, dbPath, time.Minute)
 		if got := storedConsoleBaseURL(t, srv); got != srv.BaseURL() {
 			t.Fatalf("console_base_url = %q; want seeded %q", got, srv.BaseURL())
@@ -90,7 +91,7 @@ func TestConsoleBaseURLSeedAndPreserve(t *testing.T) {
 	})
 
 	t.Run("standalone writes nothing", func(t *testing.T) {
-		dbPath := filepath.Join(t.TempDir(), "console-standalone.db")
+		dbPath := filepath.Join(storetest.Dir(t), "console-standalone.db")
 		srv, err := Start(ctx, Config{
 			Addr:      "127.0.0.1:0",
 			DBPath:    dbPath,
