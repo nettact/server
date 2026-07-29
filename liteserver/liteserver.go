@@ -486,6 +486,12 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	if err := cleanupSvc.Recover(ctx); err != nil {
 		log.Printf("cleanup recover (tick will self-heal): %v", err)
 	}
+	// A storm normally closes in the same transaction as its last member, so this
+	// can only find something a crash left behind. It closes such a storm silently
+	// rather than announcing a recovery it never actually observed.
+	if err := policySvc.RecoverStorms(ctx); err != nil {
+		log.Printf("notifypolicy recover storms: %v", err)
+	}
 
 	startWorkers(w, deps{
 		metrics:      metricsStore,
