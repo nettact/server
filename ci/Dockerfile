@@ -9,8 +9,8 @@
 # /data/webui/<version>/ with a built dist.
 #
 # Build context: an assembled workspace directory with protocol/, server-core/ and
-# server-lite/ as siblings (the release workflow checks the siblings out at
-# ci/deps.env's pinned SHAs):
+# server-lite/ as siblings (the release workflow checks the siblings out from their
+# default branches and records the resolved commits in nettact-lite-dependencies.json):
 #   docker build -f server-lite/ci/Dockerfile --build-arg VERSION=v1.0.0 \
 #     --build-arg WEBUI_VERSION=v0.1.0 <workspace-dir>
 # An isolated single-repo build fails on the v0.0.0 placeholder pseudo-versions.

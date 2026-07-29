@@ -3,18 +3,23 @@
 # Trigger: pushing a semver tag (v1.0.0, v1.0.0-rc.1). Versioning is independent of
 # agent/desktop.
 #
-# Dependency pinning (ci/deps.env):
-#   PROTOCOL_SHA / SERVER_CORE_SHA — sibling Go repos checked out at exact commits,
-#     so releases never wait on a sibling tag and a tag rebuilds identically.
+# Dependency sources: nothing is pinned in this repo. protocol and server-core are
+# checked out from their default branches and the commits that land are recorded in
+# nettact-lite-dependencies.json, published with the Release. Releases therefore
+# never wait on a sibling tag and nobody hand-maintains a SHA.
 #
-# The web console is NOT pinned in deps.env. Its tag is resolved at release time
-# from web-console's latest stable GitHub Release and stamped into the binary
-# (ldflags -X); the server downloads that release AT RUNTIME from web-console's
-# public GitHub Releases, so nothing is fetched at build time. Auto-resolving
-# keeps a server release from shipping a console that is already several
-# frontend releases behind, which is what a hand-edited pin drifts into.
-# (Desktop is the exception — it compiles the console into the binary for Store
-# review, so it fetches the dist at packaging time.)
+# The trade: a tag no longer rebuilds identically on its own, because the siblings
+# move. To reproduce a published release, pass its recorded commits as the
+# protocol_ref / server_core_ref dispatch inputs below.
+#
+# The web console follows the same principle from the other end. Its tag is
+# resolved at release time from web-console's latest stable GitHub Release and
+# stamped into the binary (ldflags -X); the server downloads that release AT
+# RUNTIME from web-console's public GitHub Releases, so nothing is fetched at
+# build time. Auto-resolving keeps a server release from shipping a console that
+# is already several frontend releases behind, which is what a hand-edited pin
+# drifts into. (Desktop is the exception — it compiles the console into the
+# binary for Store review, so it fetches the dist at packaging time.)
 #
 # Required secret: CI_SUBMODULE_SSH_KEY (org-level recommended) — read access to
 # nettact/protocol and nettact/server-core.
@@ -29,6 +34,18 @@ on:
       tag:
         description: Existing tag to (re)release, e.g. v1.0.0
         required: true
+      protocol_ref:
+        description: >-
+          protocol commit to build against. Empty resolves the default branch's
+          latest commit. When re-releasing an existing tag, pass the commit from
+          that release's nettact-lite-dependencies.json.
+        required: false
+      server_core_ref:
+        description: >-
+          server-core commit to build against. Empty resolves the default branch's
+          latest commit. When re-releasing an existing tag, pass the commit from
+          that release's nettact-lite-dependencies.json.
+        required: false
       web_console_version:
         description: >-
           Console tag to stamp, e.g. v0.2.2. Empty resolves the latest stable
@@ -84,14 +101,6 @@ jobs:
                                    || echo "is_latest=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Read dependency pins
-        id: deps
-        run: |
-          set -euo pipefail
-          source server-lite/ci/deps.env
-          echo "protocol_sha=${PROTOCOL_SHA}" >> "$GITHUB_OUTPUT"
-          echo "server_core_sha=${SERVER_CORE_SHA}" >> "$GITHUB_OUTPUT"
-
       # The runtime downloader fetches one exact tag, so "latest" must be turned
       # into a concrete vX.Y.Z here. /releases/latest already excludes drafts and
       # prereleases; the regex additionally rejects anything that is not a plain
@@ -135,21 +144,81 @@ jobs:
 
           echo "version=$tag" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout protocol @ pinned SHA
+      # An empty ref makes actions/checkout use the repository's default branch,
+      # which is how "latest protocol / server-core" is expressed here. Whatever
+      # commit lands is read back below rather than assumed.
+      - name: Checkout protocol
         uses: actions/checkout@v4
         with:
           repository: nettact/protocol
-          ref: ${{ steps.deps.outputs.protocol_sha }}
+          ref: ${{ inputs.protocol_ref }}
           path: protocol
           ssh-key: ${{ secrets.CI_SUBMODULE_SSH_KEY }}
 
-      - name: Checkout server-core @ pinned SHA
+      - name: Checkout server-core
         uses: actions/checkout@v4
         with:
           repository: nettact/server-core
-          ref: ${{ steps.deps.outputs.server_core_sha }}
+          ref: ${{ inputs.server_core_ref }}
           path: server-core
           ssh-key: ${{ secrets.CI_SUBMODULE_SSH_KEY }}
+
+      # With no committed pins, the dependency record IS the audit trail: it is the
+      # only place that says which sibling sources this binary contains. Published
+      # as a Release asset so it outlives the workflow run's log retention, and read
+      # by desktop packaging to build server-lite against the same sources.
+      - name: Record dependency commits
+        id: deps
+        run: |
+          set -euo pipefail
+          # Assigns into the named variable instead of echoing, so the function runs
+          # in this shell: a `return 1` then aborts the step under `set -e`. Echoing
+          # into $(...) would put the failure in a subshell, leaving the caller to
+          # continue with an empty commit.
+          read_head() {   # $1=target var, $2=directory
+            local dir="$2" sha
+            sha=$(git -C "$dir" rev-parse HEAD)
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "$dir checkout did not resolve to a full commit (got '$sha')" >&2
+              return 1
+            }
+            printf -v "$1" '%s' "$sha"
+          }
+          read_head protocol_sha protocol
+          read_head server_core_sha server-core
+          echo "protocol_sha=$protocol_sha" >> "$GITHUB_OUTPUT"
+          echo "server_core_sha=$server_core_sha" >> "$GITHUB_OUTPUT"
+
+          mkdir -p dist-out
+          jq -n \
+            --arg version "${{ inputs.tag || github.ref_name }}" \
+            --arg commit "${{ steps.rel.outputs.sha }}" \
+            --arg protocol_sha "$protocol_sha" \
+            --arg server_core_sha "$server_core_sha" \
+            --arg web_console_version "${{ steps.webui.outputs.version }}" \
+            '{
+              schema_version: 1,
+              "server-lite": {version: $version, commit: $commit},
+              sources: {
+                protocol: {commit: $protocol_sha},
+                "server-core": {commit: $server_core_sha}
+              },
+              dependencies: {
+                "web-console": {version: $web_console_version}
+              }
+            }' > dist-out/nettact-lite-dependencies.json
+          (
+            cd dist-out
+            sha256sum nettact-lite-dependencies.json > nettact-lite-dependencies.json.sha256
+          )
+          cat dist-out/nettact-lite-dependencies.json
+          {
+            echo "## Resolved dependency sources"
+            echo
+            echo "- protocol: \`$protocol_sha\`"
+            echo "- server-core: \`$server_core_sha\`"
+            echo "- web-console: ${{ steps.webui.outputs.version }}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/setup-go@v5
         with:
@@ -242,6 +311,8 @@ jobs:
             dist-bins/nettact-lite-linux-amd64
             dist-bins/nettact-lite-linux-arm64
             dist-bins/SHA256SUMS
+            dist-out/nettact-lite-dependencies.json
+            dist-out/nettact-lite-dependencies.json.sha256
             server-lite/deploy/install.sh
           body: |
             ## nettact-lite ${{ inputs.tag || github.ref_name }}
@@ -250,6 +321,13 @@ jobs:
             - `nettact/protocol@${{ steps.deps.outputs.protocol_sha }}`
             - `nettact/server-core@${{ steps.deps.outputs.server_core_sha }}`
             - web-console **${{ steps.webui.outputs.version }}** (downloaded by the server at runtime)
+
+            The Go sources above were resolved from their default branches when this
+            build started; `nettact-lite-dependencies.json` is the machine-readable
+            record of it. Desktop packaging reads that record to build this server
+            against the same sources, and re-releasing this tag reproducibly means
+            passing those commits as the workflow's `protocol_ref` / `server_core_ref`
+            inputs.
 
             ### Container image (linux/amd64 · linux/arm64, cosign-signed)
             ```

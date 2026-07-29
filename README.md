@@ -21,7 +21,7 @@ go run ./cmd/nettact-lite --db ./nettact.db --addr :12450 --dev
   `nettact-lite --help`。
 - Web UI **运行时自动下载**:发布流水线自动解析
   [web-console](https://github.com/nettact/web-console) 的最新稳定 Release,
-  用 ldflags 把该精确 tag 烧入二进制(不再在 `ci/deps.env` 里手工锁版本);
+  用 ldflags 把该精确 tag 烧入二进制(版本不需要手工维护);
   首次启动检测到前端缺失时从其公开 GitHub Release 下载(SHA256 校验)到
   `-webui-dir`(默认 `<db 目录>/webui`)。下载完成前非 `/api` 路径返回内置
   占位页(503),API 与探针不受影响。
