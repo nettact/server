@@ -30,7 +30,7 @@ import (
 
 	"github.com/nettact/protocol/enroll"
 	"github.com/nettact/protocol/wire"
-	"github.com/nettact/server-core/agentalert"
+	"github.com/nettact/server-core/agentconnectivity"
 	"github.com/nettact/server-core/agentstatus"
 	"github.com/nettact/server-core/agentws"
 	"github.com/nettact/server-core/api"
@@ -362,7 +362,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	// Agent liveness detector (AGENT-002): offline/recovery state machine, driven
 	// by a worker tick fed the live connected-session set. It records through the
 	// fault engine like every other detector.
-	agentAlertEng := agentalert.New(db, settingsSvc, faultSvc, bus)
+	agentConnEng := agentconnectivity.New(db, settingsSvc, faultSvc, bus)
 
 	// History-data cleanup: durable async delete jobs over the metrics store,
 	// driven by a worker tick and recovered after a restart.
@@ -427,8 +427,8 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	agentStatusBridge := func(siteID string) {
 		broker.Notify(siteID, sse.Event{Name: sse.EventAgentStatusChanged, Data: agentStatusEventData(siteID)})
 	}
-	bus.Subscribe(eventbus.TopicAgentAlertChanged, func(m eventbus.Message) {
-		if ev, ok := m.Payload.(eventbus.AgentAlertChanged); ok {
+	bus.Subscribe(eventbus.TopicAgentConnectivityChanged, func(m eventbus.Message) {
+		if ev, ok := m.Payload.(eventbus.AgentConnectivityChanged); ok {
 			agentStatusBridge(ev.SiteID)
 		}
 	})
@@ -494,18 +494,18 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	}
 
 	startWorkers(w, deps{
-		metrics:      metricsStore,
-		ingest:       ing,
-		identity:     idSvc,
-		registry:     reg,
-		incidentops:  incidentOps,
-		inventory:    invSvc,
-		cleanup:      cleanupSvc,
-		agentalert:   agentAlertEng,
-		notifypolicy: policySvc,
-		bus:          bus,
-		hub:          agentHub,
-		ret:          cfg.Retention,
+		metrics:           metricsStore,
+		ingest:            ing,
+		identity:          idSvc,
+		registry:          reg,
+		incidentops:       incidentOps,
+		inventory:         invSvc,
+		cleanup:           cleanupSvc,
+		agentconnectivity: agentConnEng,
+		notifypolicy:      policySvc,
+		bus:               bus,
+		hub:               agentHub,
+		ret:               cfg.Retention,
 	})
 	// Desktop tray summary: incident lifecycle changes kick an immediate refresh.
 	// The tray counts incidents, not signals, so it matches the fault centre.
@@ -547,31 +547,31 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	}
 
 	apiDeps := api.Deps{
-		Identity:     idSvc,
-		Registry:     reg,
-		Metrics:      metricsStore,
-		Cleanup:      cleanupSvc,
-		Config:       cfgSvc,
-		Site:         siteSvc,
-		Inventory:    invSvc,
-		Fault:        faultSvc,
-		NotifyPolicy: policySvc,
-		Incident:     incidentSvc,
-		IncidentOps:  incidentOps,
-		Notification: notifSvc,
-		Settings:     settingsSvc,
-		Audit:        auditSvc,
-		HostLive:     hostLive,
-		OpIssue:      opSvc,
-		TargetStatus: tgtStatusSvc,
-		AgentStatus:  agentStatusSvc,
-		AgentAlert:   agentAlertEng,
-		SSE:          broker,
-		AgentWS:      agentHub,
-		Bus:          bus,
-		SPA:          webuiMgr.Handler(),
-		Dev:          cfg.Dev,
-		SecureCookie: cfg.SecureCookie,
+		Identity:          idSvc,
+		Registry:          reg,
+		Metrics:           metricsStore,
+		Cleanup:           cleanupSvc,
+		Config:            cfgSvc,
+		Site:              siteSvc,
+		Inventory:         invSvc,
+		Fault:             faultSvc,
+		NotifyPolicy:      policySvc,
+		Incident:          incidentSvc,
+		IncidentOps:       incidentOps,
+		Notification:      notifSvc,
+		Settings:          settingsSvc,
+		Audit:             auditSvc,
+		HostLive:          hostLive,
+		OpIssue:           opSvc,
+		TargetStatus:      tgtStatusSvc,
+		AgentStatus:       agentStatusSvc,
+		AgentConnectivity: agentConnEng,
+		SSE:               broker,
+		AgentWS:           agentHub,
+		Bus:               bus,
+		SPA:               webuiMgr.Handler(),
+		Dev:               cfg.Dev,
+		SecureCookie:      cfg.SecureCookie,
 		ListenStatus: func(context.Context) *api.ListenStatus {
 			return &api.ListenStatus{
 				EffectiveAddr: effectiveAddr(s.listen.addr, s.ln.Addr()),

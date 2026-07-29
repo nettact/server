@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nettact/server-core/agentalert"
+	"github.com/nettact/server-core/agentconnectivity"
 	"github.com/nettact/server-core/agentws"
 	"github.com/nettact/server-core/cleanup"
 	"github.com/nettact/server-core/eventbus"
@@ -120,18 +120,18 @@ func (w *workers) stop(ctx context.Context) bool {
 
 // deps bundles the services the periodic and event-driven workers need.
 type deps struct {
-	metrics      *metrics.Store
-	ingest       *ingest.Service
-	identity     *identity.Service
-	registry     *registry.Service
-	incidentops  *incidentops.Service
-	inventory    *inventory.Service
-	cleanup      *cleanup.Service
-	agentalert   *agentalert.Engine
-	notifypolicy *notifypolicy.Service
-	bus          *eventbus.Bus
-	hub          *agentws.Hub
-	ret          metrics.RetentionConfig
+	metrics           *metrics.Store
+	ingest            *ingest.Service
+	identity          *identity.Service
+	registry          *registry.Service
+	incidentops       *incidentops.Service
+	inventory         *inventory.Service
+	cleanup           *cleanup.Service
+	agentconnectivity *agentconnectivity.Engine
+	notifypolicy      *notifypolicy.Service
+	bus               *eventbus.Bus
+	hub               *agentws.Hub
+	ret               metrics.RetentionConfig
 }
 
 func startWorkers(w *workers, d deps) {
@@ -218,7 +218,7 @@ func startWorkers(w *workers, d deps) {
 	// the offline/recovery state machine. It measures grace from the first tick an
 	// agent is seen absent, so a server restart never mass-confirms offline faults.
 	w.every(5*time.Second, func(ctx context.Context) {
-		if err := d.agentalert.Tick(ctx, d.hub.ConnectedIDs()); err != nil {
+		if err := d.agentconnectivity.Tick(ctx, d.hub.ConnectedIDs()); err != nil {
 			log.Printf("agent liveness tick: %v", err)
 		}
 	})
