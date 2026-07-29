@@ -14,6 +14,7 @@ import (
 	"github.com/nettact/server-core/identity"
 	"github.com/nettact/server-core/incidentops"
 	"github.com/nettact/server-core/ingest"
+	"github.com/nettact/server-core/inventory"
 	"github.com/nettact/server-core/metrics"
 	"github.com/nettact/server-core/notifypolicy"
 	"github.com/nettact/server-core/registry"
@@ -71,6 +72,30 @@ func (w *workers) every(d time.Duration, fn func(context.Context)) {
 	}()
 }
 
+// nowThenEvery runs fn once immediately and then on a ticker. Use it for
+// maintenance whose interval is longer than a plausible session: the desktop
+// tray is routinely launched, used and closed inside an hour, and a plain hourly
+// worker would then never fire once across a machine's whole lifetime.
+func (w *workers) nowThenEvery(d time.Duration, fn func(context.Context)) {
+	if !w.add() {
+		return
+	}
+	go func() {
+		defer w.wg.Done()
+		fn(w.ctx)
+		t := time.NewTicker(d)
+		defer t.Stop()
+		for {
+			select {
+			case <-w.ctx.Done():
+				return
+			case <-t.C:
+				fn(w.ctx)
+			}
+		}
+	}()
+}
+
 // stop cancels all workers and waits for them to return, bounded by ctx. It
 // reports whether every worker actually stopped: a false return means the
 // deadline fired first and workers may still be running, so the caller must NOT
@@ -100,6 +125,7 @@ type deps struct {
 	identity     *identity.Service
 	registry     *registry.Service
 	incidentops  *incidentops.Service
+	inventory    *inventory.Service
 	cleanup      *cleanup.Service
 	agentalert   *agentalert.Engine
 	notifypolicy *notifypolicy.Service
@@ -136,6 +162,21 @@ func startWorkers(w *workers, d deps) {
 		// evidence_expired while preserving the incident/alert/evidence summaries.
 		if err := d.incidentops.Retention(ctx); err != nil {
 			log.Printf("incidentops retention: %v", err)
+		}
+	})
+
+	// LAN device retention. Discovery is upsert-only — an agent never reports that
+	// a device left, and ingest ignores OpRemove — so age is the only departure
+	// signal there is, and without this the devices table only grows. MAC
+	// randomization makes that unbounded rather than merely untidy: a phone mints a
+	// fresh address on every Wi-Fi join, so the console's device list would fill
+	// with addresses that existed for one association. Runs immediately at startup
+	// as well as hourly, because the desktop tray often does not stay up for an hour.
+	w.nowThenEvery(time.Hour, func(ctx context.Context) {
+		if n, err := d.inventory.Retention(ctx); err != nil {
+			log.Printf("device retention: %v", err)
+		} else if n > 0 {
+			log.Printf("device retention: %d stale device(s) removed", n)
 		}
 	})
 

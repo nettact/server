@@ -345,7 +345,8 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	}
 
 	auditSvc := audit.New(db)
-	invSvc := inventory.New(db)
+	// Inventory takes settings for the device retention windows (see its worker).
+	invSvc := inventory.New(db, settingsSvc)
 	// Ingest evaluates the batch's probe rounds inside its own sample transaction
 	// (atomic telemetry + detector state), so it takes the fault engine as its
 	// Evaluator.
@@ -492,6 +493,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		identity:     idSvc,
 		registry:     reg,
 		incidentops:  incidentOps,
+		inventory:    invSvc,
 		cleanup:      cleanupSvc,
 		agentalert:   agentAlertEng,
 		notifypolicy: policySvc,
