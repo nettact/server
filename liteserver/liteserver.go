@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -76,8 +77,19 @@ type Config struct {
 
 	// WebUIDir is the root directory for the runtime-downloaded web console
 	// (versions install to WebUIDir/<version>/). Empty selects
-	// filepath.Dir(DBPath) + "/webui".
+	// filepath.Dir(DBPath) + "/webui". Ignored when WebUIFS is set.
 	WebUIDir string
+
+	// WebUIFS, when non-nil, is a built web-console dist compiled into the
+	// calling binary (index.html at its root). It is served directly and the
+	// runtime downloader is never started, so WebUIDir is unused.
+	//
+	// The desktop app sets this: Microsoft Store and App Store review read a
+	// runtime fetch of application content as downloading a separate
+	// executable, so packaged builds must ship the console inside the binary.
+	// Server deployments leave it nil and keep downloading, which is what lets
+	// the console update without reshipping the server image.
+	WebUIFS fs.FS
 
 	// AdminUser/AdminPass seed the single admin on first run (EnsureAdmin). On a
 	// later run they are ignored and the existing admin is used.
@@ -249,7 +261,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	if cfg.Retention == (metrics.RetentionConfig{}) {
 		cfg.Retention = metrics.DefaultRetention()
 	}
-	if cfg.WebUIDir == "" {
+	if cfg.WebUIDir == "" && cfg.WebUIFS == nil {
 		cfg.WebUIDir = filepath.Join(filepath.Dir(cfg.DBPath), "webui")
 	}
 
@@ -495,7 +507,14 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		bus.Subscribe(eventbus.TopicIncidentResolved, onIncidents)
 	}
 
-	webuiMgr := webui.New(cfg.WebUIDir, webui.Version)
+	// A bundled dist (desktop) is served straight from the binary; everything
+	// else resolves an installed version on disk and downloads in the background.
+	var webuiMgr *webui.Manager
+	if cfg.WebUIFS != nil {
+		webuiMgr = webui.NewEmbedded(cfg.WebUIFS)
+	} else {
+		webuiMgr = webui.New(cfg.WebUIDir, webui.Version)
+	}
 
 	// Resolve the listen address (DB > flag > default) before building the router
 	// so its status closure can report the outcome; the actual bind happens below.
@@ -654,8 +673,12 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		}
 	}()
 
+	webuiSrc := cfg.WebUIDir
+	if cfg.WebUIFS != nil {
+		webuiSrc = "embedded"
+	}
 	log.Printf("nettact-lite listening on %s (dev=%v, db=%s, max_agents=%d, desktop=%v, webui=%s@%s)",
-		ln.Addr(), cfg.Dev, cfg.DBPath, cfg.MaxAgents, cfg.Desktop != nil, webui.Version, cfg.WebUIDir)
+		ln.Addr(), cfg.Dev, cfg.DBPath, cfg.MaxAgents, cfg.Desktop != nil, webui.Version, webuiSrc)
 
 	// Nothing can fail Start past this point, so the background download loop
 	// will always be paired with a Shutdown that closes it.

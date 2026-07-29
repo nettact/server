@@ -19,11 +19,14 @@ go run ./cmd/nettact-lite --db ./nettact.db --addr :12450 --dev
 - **全部 flag 参考、监听地址优先级、数据保留、TLS 与会话 Cookie**:见
   **[docs/server-config.md](../docs/server-config.md)**;单一事实来源为
   `nettact-lite --help`。
-- Web UI **运行时自动下载**:编译时用 ldflags 烧入精确的
-  [web-console](https://github.com/nettact/web-console) 版本(`ci/deps.env` 的
-  `WEB_CONSOLE_VERSION`),首次启动检测到前端缺失时从其公开 GitHub Release
-  下载(SHA256 校验)到 `-webui-dir`(默认 `<db 目录>/webui`)。下载完成前
-  非 `/api` 路径返回内置占位页(503),API 与探针不受影响。
+- Web UI **运行时自动下载**:发布流水线自动解析
+  [web-console](https://github.com/nettact/web-console) 的最新稳定 Release,
+  用 ldflags 把该精确 tag 烧入二进制(不再在 `ci/deps.env` 里手工锁版本);
+  首次启动检测到前端缺失时从其公开 GitHub Release 下载(SHA256 校验)到
+  `-webui-dir`(默认 `<db 目录>/webui`)。下载完成前非 `/api` 路径返回内置
+  占位页(503),API 与探针不受影响。
+  - desktop 走另一条路:前端在打包时直接编译进二进制、运行时不下载
+    (微软商店/苹果商店审核会把运行时拉取应用内容视为下载其他可执行文件)。
   - 开发构建(未烧版本,`Version=dev`)不下载;设 `NETTACT_WEBUI_LOCAL`
     指向本地构建好的 dist 即可直接服务。
   - 镜像/内网部署可用 `NETTACT_WEBUI_BASE_URL` 覆盖下载源,或预置

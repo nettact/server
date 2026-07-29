@@ -6,9 +6,15 @@
 # Dependency pinning (ci/deps.env):
 #   PROTOCOL_SHA / SERVER_CORE_SHA — sibling Go repos checked out at exact commits,
 #     so releases never wait on a sibling tag and a tag rebuilds identically.
-#   WEB_CONSOLE_VERSION — the exact web-console release tag stamped into the
-#     binary (ldflags -X); the server downloads that release AT RUNTIME from
-#     web-console's public GitHub Releases. Nothing is fetched at build time.
+#
+# The web console is NOT pinned in deps.env. Its tag is resolved at release time
+# from web-console's latest stable GitHub Release and stamped into the binary
+# (ldflags -X); the server downloads that release AT RUNTIME from web-console's
+# public GitHub Releases, so nothing is fetched at build time. Auto-resolving
+# keeps a server release from shipping a console that is already several
+# frontend releases behind, which is what a hand-edited pin drifts into.
+# (Desktop is the exception — it compiles the console into the binary for Store
+# review, so it fetches the dist at packaging time.)
 #
 # Required secret: CI_SUBMODULE_SSH_KEY (org-level recommended) — read access to
 # nettact/protocol and nettact/server-core.
@@ -23,6 +29,13 @@ on:
       tag:
         description: Existing tag to (re)release, e.g. v1.0.0
         required: true
+      web_console_version:
+        description: >-
+          Console tag to stamp, e.g. v0.2.2. Empty resolves the latest stable
+          release. When re-releasing an existing server tag, pass the value from
+          that release's notes — otherwise a newer console has appeared since and
+          the rebuilt artifacts differ from the ones already published.
+        required: false
 
 concurrency:
   group: release-${{ inputs.tag || github.ref_name }}
@@ -78,8 +91,49 @@ jobs:
           source server-lite/ci/deps.env
           echo "protocol_sha=${PROTOCOL_SHA}" >> "$GITHUB_OUTPUT"
           echo "server_core_sha=${SERVER_CORE_SHA}" >> "$GITHUB_OUTPUT"
-          [[ "${WEB_CONSOLE_VERSION}" =~ ^v[0-9] ]] || { echo "WEB_CONSOLE_VERSION must be an exact tag (got '${WEB_CONSOLE_VERSION}')" >&2; exit 1; }
-          echo "webui_version=${WEB_CONSOLE_VERSION}" >> "$GITHUB_OUTPUT"
+
+      # The runtime downloader fetches one exact tag, so "latest" must be turned
+      # into a concrete vX.Y.Z here. /releases/latest already excludes drafts and
+      # prereleases; the regex additionally rejects anything that is not a plain
+      # stable tag.
+      #
+      # Both assets are then confirmed to exist. The stamped tag is only ever
+      # resolved at build time, but it is consumed months later by every deployed
+      # binary: a release whose upload was interrupted, or one created by hand,
+      # would leave the tag looking valid here while the downloader 404s forever
+      # and every fresh install sits on the 503 placeholder. Checking the two
+      # filenames the downloader asks for turns that into a failed release.
+      - name: Resolve web-console release
+        id: webui
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Empty on a tag push; set only when a dispatch pins the console.
+          PINNED: ${{ inputs.web_console_version }}
+        run: |
+          set -euo pipefail
+          owner="${{ github.repository_owner }}"
+          if [[ -n "$PINNED" ]]; then
+            tag="$PINNED"
+            release=$(gh api "repos/${owner}/web-console/releases/tags/${tag}")
+            echo "web console: $tag (pinned by workflow_dispatch)"
+          else
+            release=$(gh api "repos/${owner}/web-console/releases/latest")
+            tag=$(jq -r .tag_name <<<"$release")
+            echo "web console: $tag (latest stable)"
+          fi
+
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "web-console release must be a stable vX.Y.Z tag (got '$tag')" >&2
+            exit 1
+          }
+          for asset in SHA256SUMS "web-console-dist-${tag}.tar.gz"; do
+            jq -e --arg a "$asset" 'any(.assets[]; .name == $a)' <<<"$release" >/dev/null || {
+              echo "web-console ${tag} has no '${asset}' asset; the runtime download would 404 forever" >&2
+              exit 1
+            }
+          done
+
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Checkout protocol @ pinned SHA
         uses: actions/checkout@v4
@@ -124,7 +178,7 @@ jobs:
           mkdir -p dist-bins
           for arch in amd64 arm64; do
             ( cd server-lite && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
-                go build -trimpath -ldflags "-s -w -X github.com/nettact/server-lite/internal/webui.Version=${{ steps.deps.outputs.webui_version }}" \
+                go build -trimpath -ldflags "-s -w -X github.com/nettact/server-lite/internal/webui.Version=${{ steps.webui.outputs.version }}" \
                 -o "../dist-bins/nettact-lite-linux-$arch" ./cmd/nettact-lite )
           done
           ( cd dist-bins && sha256sum * > SHA256SUMS && cat SHA256SUMS )
@@ -162,7 +216,7 @@ jobs:
           build-args: |
             VERSION=${{ inputs.tag || github.ref_name }}
             REVISION=${{ steps.rel.outputs.sha }}
-            WEBUI_VERSION=${{ steps.deps.outputs.webui_version }}
+            WEBUI_VERSION=${{ steps.webui.outputs.version }}
           provenance: true
           sbom: true
           cache-from: type=gha,scope=lite
@@ -195,7 +249,7 @@ jobs:
             Built against:
             - `nettact/protocol@${{ steps.deps.outputs.protocol_sha }}`
             - `nettact/server-core@${{ steps.deps.outputs.server_core_sha }}`
-            - web-console **${{ steps.deps.outputs.webui_version }}** (downloaded by the server at runtime)
+            - web-console **${{ steps.webui.outputs.version }}** (downloaded by the server at runtime)
 
             ### Container image (linux/amd64 · linux/arm64, cosign-signed)
             ```
