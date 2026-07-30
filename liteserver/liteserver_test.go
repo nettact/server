@@ -65,7 +65,7 @@ func TestDesktopStartLoginReplayShutdownAndRestart(t *testing.T) {
 		t.Fatalf("healthz status = %d", resp.StatusCode)
 	}
 
-	loginURL, err := srv.MintLoginURL()
+	loginURL, err := srv.MintLoginURL(LoginTarget{})
 	if err != nil {
 		t.Fatalf("MintLoginURL: %v", err)
 	}
@@ -217,18 +217,18 @@ func TestValidateDesktopAndStandaloneAddresses(t *testing.T) {
 
 func TestLoginTokensAreBoundedExpiringAndSingleUse(t *testing.T) {
 	tokens := newLoginTokens(-time.Second)
-	expired, err := tokens.mint()
+	expired, err := tokens.mint("/")
 	if err != nil {
 		t.Fatalf("mint expired token: %v", err)
 	}
-	if tokens.redeem(expired) {
+	if _, ok := tokens.redeem(expired); ok {
 		t.Fatal("expired token redeemed")
 	}
 
 	tokens = newLoginTokens(time.Minute)
 	issued := make([]string, maxOutstandingLoginTokens+1)
 	for i := range issued {
-		issued[i], err = tokens.mint()
+		issued[i], err = tokens.mint("/")
 		if err != nil {
 			t.Fatalf("mint %d: %v", i, err)
 		}
@@ -237,12 +237,15 @@ func TestLoginTokensAreBoundedExpiringAndSingleUse(t *testing.T) {
 		t.Fatalf("token store size = %d; want %d", len(tokens.m), maxOutstandingLoginTokens)
 	}
 	last := issued[len(issued)-1]
-	if !tokens.redeem(last) || tokens.redeem(last) {
+	if _, ok := tokens.redeem(last); !ok {
+		t.Fatal("token was not redeemable")
+	}
+	if _, ok := tokens.redeem(last); ok {
 		t.Fatal("token was not exactly single-use")
 	}
 	survivingOld := 0
 	for _, token := range issued[:len(issued)-1] {
-		if tokens.redeem(token) {
+		if _, ok := tokens.redeem(token); ok {
 			survivingOld++
 		}
 	}

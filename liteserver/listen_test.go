@@ -155,7 +155,7 @@ func TestDesktopListenChangeFiresCallback(t *testing.T) {
 	})
 
 	// Log in via the one-time desktop login URL to get a session cookie.
-	loginURL, err := srv.MintLoginURL()
+	loginURL, err := srv.MintLoginURL(LoginTarget{})
 	if err != nil {
 		t.Fatalf("MintLoginURL: %v", err)
 	}

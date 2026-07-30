@@ -129,6 +129,14 @@ type DesktopConfig struct {
 	// OnIncidentsChanged, when non-nil, fires from a background goroutine after an
 	// incident opens or resolves. The desktop refreshes its tray summary.
 	OnIncidentsChanged func()
+
+	// NativeDeepLinks says the host has registered a per-user nettact:// protocol
+	// handler and can therefore receive a notification click. Native OS
+	// notifications then carry a credential-free nettact:// URI, which routes the
+	// click back through the host so it can mint a login against the loopback
+	// address it is really serving. Leave it false where no handler exists: an
+	// unhandled URI makes the notification do nothing at all.
+	NativeDeepLinks bool
 }
 
 // Server is a running Lite server. It owns the listener, HTTP server, agent hub,
@@ -310,7 +318,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	// Leaf services the fault engine and orchestration build on.
 	metricsStore := metrics.New(db)
 	settingsSvc := settings.New(db)
-	notifSvc := notification.New(db)
+	notifSvc := notification.New(db, cfg.Desktop != nil && cfg.Desktop.NativeDeepLinks)
 
 	// Incident snapshot + traceroute orchestration. Constructed before the fault
 	// engine (which uses it as the synchronous incident-base snapshot writer) and
