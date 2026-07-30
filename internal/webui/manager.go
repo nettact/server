@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	defaultBaseURL = "https://github.com/nettact/web-console/releases/download"
+	defaultBaseURL = "https://d.nettact.org/web-console"
 
 	// installedVersionFile records the exact web-console release installed in
 	// a version directory. The directory name alone is not trusted: an
@@ -22,7 +22,7 @@ const (
 	installedVersionFile = ".installed-version"
 
 	// envBaseURL overrides the release download base URL (mirror / air-gapped
-	// deployments). Layout must match GitHub Releases: <base>/<tag>/<asset>.
+	// deployments). The source must expose <base>/<tag>/<asset>.
 	envBaseURL = "NETTACT_WEBUI_BASE_URL"
 
 	// envLocalDir points at a locally built web-console dist (dev builds). When

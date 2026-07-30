@@ -109,6 +109,14 @@ func body(t *testing.T, resp *http.Response) string {
 	return string(b)
 }
 
+func TestNewUsesDownloadCenterByDefault(t *testing.T) {
+	t.Setenv(envBaseURL, "")
+	m := New(t.TempDir(), "v0.1.0")
+	if m.baseURL != "https://d.nettact.org/web-console" {
+		t.Fatalf("baseURL = %q, want NetTact download center", m.baseURL)
+	}
+}
+
 func TestFreshInstallAndSwap(t *testing.T) {
 	const tag = "v0.1.0"
 	tarball, sum := buildDistTarGz(t, map[string]string{"index.html": "<html>REAL-SPA</html>", "assets/app.js": "js"})
