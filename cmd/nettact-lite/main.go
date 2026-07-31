@@ -35,6 +35,7 @@ import (
 
 	"github.com/nettact/server-core/identity"
 	"github.com/nettact/server-core/store"
+	"github.com/nettact/server-lite/internal/version"
 	"github.com/nettact/server-lite/liteserver"
 )
 
@@ -65,7 +66,13 @@ func main() {
 	// reverse proxies (browser sees https, we serve http).
 	secureCookie := flag.String("secure-cookie", "auto",
 		"session cookie Secure attribute: auto (set iff TLS is enabled), true (always; use behind a TLS-terminating reverse proxy), false (never)")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("nettact-lite", version.Version)
+		return
+	}
 
 	addrFromFlag := false
 	flag.Visit(func(f *flag.Flag) {

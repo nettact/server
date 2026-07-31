@@ -31,10 +31,14 @@ RUN go work init ./protocol ./server-core ./server-lite \
 ARG TARGETOS
 ARG TARGETARCH
 ARG WEBUI_VERSION=dev
+# VERSION is this server's own release tag (the image tag). It is stamped into the
+# binary so the console's update check can tell whether the server is out of date;
+# stage 2 re-declares it for the OCI label.
+ARG VERSION=dev
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags "-s -w -X github.com/nettact/server-lite/internal/webui.Version=${WEBUI_VERSION}" \
+    go build -trimpath -ldflags "-s -w -X github.com/nettact/server-lite/internal/webui.Version=${WEBUI_VERSION} -X github.com/nettact/server-lite/internal/version.Version=${VERSION}" \
       -o /out/nettact-lite ./server-lite/cmd/nettact-lite
 
 # ---- Stage 2: minimal runtime ----------------------------------------------

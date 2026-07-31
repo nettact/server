@@ -55,6 +55,8 @@ import (
 	"github.com/nettact/server-core/sse"
 	"github.com/nettact/server-core/store"
 	"github.com/nettact/server-core/targetstatus"
+	"github.com/nettact/server-core/updatecheck"
+	"github.com/nettact/server-lite/internal/version"
 	"github.com/nettact/server-lite/internal/webui"
 )
 
@@ -137,6 +139,26 @@ type DesktopConfig struct {
 	// address it is really serving. Leave it false where no handler exists: an
 	// unhandled URI makes the notification do nothing at all.
 	NativeDeepLinks bool
+
+	// AppVersion is the desktop build's own stamped version. The desktop is what
+	// the user updates — the embedded server ships inside it — so it, not
+	// version.Version, is what the update check compares.
+	AppVersion string
+
+	// StoreInstall marks a Microsoft Store (MSIX) install. Those builds are
+	// updated by the Store, so the check asks the Store (CheckStoreUpdate) and
+	// the console points at the Store page instead of the download center.
+	StoreInstall bool
+
+	// CheckStoreUpdate queries the Store for a pending package update. Non-nil
+	// only on packaged Windows builds; a failure degrades to "no update found"
+	// without disturbing the rest of the check.
+	CheckStoreUpdate func(ctx context.Context) (updatecheck.CheckResult, error)
+
+	// OnUpdate fires from a background goroutine when the daily check finds a
+	// newer version and update notices are switched on. The desktop turns it into
+	// one tray balloon per version.
+	OnUpdate func(updatecheck.Status)
 }
 
 // Server is a running Lite server. It owns the listener, HTTP server, agent hub,
@@ -159,6 +181,7 @@ type Server struct {
 	setSvc      *settings.Service
 	auditSvc    *audit.Service
 	incidentSvc *incident.Service
+	updateSvc   *updatecheck.Service // nil when update checking is switched off
 	adminID     string
 
 	login *loginTokens // nil unless Desktop != nil
@@ -532,6 +555,26 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		webuiMgr = webui.New(cfg.WebUIDir, webui.Version)
 	}
 
+	// Update checking. A standalone server checks its own release; the desktop
+	// passes the app version it actually ships as, plus a Store query when it was
+	// installed from the Store. New returns nil when the off switch is set, and
+	// every call below is nil-safe.
+	updateCfg := updatecheck.Config{
+		InstallType:    updatecheck.InstallServer,
+		CurrentVersion: version.Version,
+		Settings:       settingsSvc,
+	}
+	if cfg.Desktop != nil {
+		updateCfg.InstallType = updatecheck.InstallDesktop
+		if cfg.Desktop.StoreInstall {
+			updateCfg.InstallType = updatecheck.InstallStore
+			updateCfg.Checker = cfg.Desktop.CheckStoreUpdate
+		}
+		updateCfg.CurrentVersion = cfg.Desktop.AppVersion
+		updateCfg.OnUpdate = cfg.Desktop.OnUpdate
+	}
+	updateSvc := updatecheck.New(updateCfg)
+
 	// Resolve the listen address (DB > flag > default) before building the router
 	// so its status closure can report the outcome; the actual bind happens below.
 	listenRes := resolveListenAddr(ctx, settingsSvc, cfg)
@@ -550,6 +593,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		setSvc:      settingsSvc,
 		auditSvc:    auditSvc,
 		incidentSvc: incidentSvc,
+		updateSvc:   updateSvc,
 		adminID:     admin.ID,
 		errCh:       make(chan error, 1),
 	}
@@ -580,6 +624,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		SPA:               webuiMgr.Handler(),
 		Dev:               cfg.Dev,
 		SecureCookie:      cfg.SecureCookie,
+		Update:            updateSvc,
 		ListenStatus: func(context.Context) *api.ListenStatus {
 			return &api.ListenStatus{
 				EffectiveAddr: effectiveAddr(s.listen.addr, s.ln.Addr()),
@@ -693,12 +738,19 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	if cfg.WebUIFS != nil {
 		webuiSrc = "embedded"
 	}
-	log.Printf("nettact-lite listening on %s (dev=%v, db=%s, max_agents=%d, desktop=%v, webui=%s@%s)",
-		ln.Addr(), cfg.Dev, cfg.DBPath, cfg.MaxAgents, cfg.Desktop != nil, webui.Version, webuiSrc)
+	log.Printf("nettact-lite %s listening on %s (dev=%v, db=%s, max_agents=%d, desktop=%v, webui=%s@%s)",
+		version.Version, ln.Addr(), cfg.Dev, cfg.DBPath, cfg.MaxAgents, cfg.Desktop != nil, webui.Version, webuiSrc)
 
 	// Nothing can fail Start past this point, so the background download loop
 	// will always be paired with a Shutdown that closes it.
 	s.webui.Start()
+
+	// Check for a newer release now and daily after that. nowThenEvery is used
+	// rather than a plain ticker because a desktop tray is routinely launched,
+	// used and closed inside an hour, and a 24h ticker would then never fire.
+	if updateSvc != nil {
+		w.nowThenEvery(24*time.Hour, updateSvc.RunOnce)
+	}
 
 	ok = true
 	return s, nil
@@ -742,6 +794,33 @@ func (s *Server) Err() <-chan error { return s.errCh }
 // the same thing.
 func (s *Server) OpenIncidentCount(ctx context.Context) (int, error) {
 	return s.incidentSvc.CountOpen(ctx, site.DefaultSiteID)
+}
+
+// CheckUpdatesNow runs one immediate update check on behalf of a person who
+// asked for one (the desktop tray menu) and reports the outcome. It deliberately
+// does not fire the OnUpdate notification path: the caller is already showing
+// the answer.
+func (s *Server) CheckUpdatesNow(ctx context.Context) (updatecheck.Status, error) {
+	return s.updateSvc.CheckNow(ctx)
+}
+
+// UpdateNoticesDisabled reports whether update notices are switched off. The
+// desktop tray reads it to render its "Update notifications" checkbox — the
+// switch is one server setting shared with the web console, so turning notices
+// off in either place silences both.
+func (s *Server) UpdateNoticesDisabled(ctx context.Context) bool {
+	return s.setSvc.Bool(ctx, settings.KeyUpdateNoticeDisabled)
+}
+
+// SetUpdateNoticesDisabled writes the shared update-notice switch (tray menu).
+func (s *Server) SetUpdateNoticesDisabled(ctx context.Context, disabled bool) error {
+	// "0" rather than "" because Set treats an empty value as a delete, and the
+	// stored row is what the console's settings GET reads back.
+	v := "0"
+	if disabled {
+		v = "1"
+	}
+	return s.setSvc.Set(ctx, settings.KeyUpdateNoticeDisabled, v)
 }
 
 // MintEnrollmentToken issues a one-time enrollment token for the default site,
