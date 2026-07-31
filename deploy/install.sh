@@ -119,9 +119,36 @@ fi
 
 docker compose version >/dev/null 2>&1 || die "Docker Compose v2 ('docker compose') not available — the legacy v1 'docker-compose' is not supported"
 
+# host_timezone — the host's IANA zone name, or empty if it cannot be determined.
+# The times PEOPLE read (notification bodies, log lines) are printed in the
+# server's local zone, and a container inherits none of the host's, so without
+# this the default deployment announces outages hours off the operator's wall
+# clock. Stored and transmitted times are UTC either way.
+host_timezone() {
+  local tz=""
+  if command -v timedatectl >/dev/null 2>&1; then
+    tz="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+  fi
+  if [ -z "$tz" ] && [ -r /etc/timezone ]; then
+    tz="$(head -n1 /etc/timezone 2>/dev/null || true)"
+  fi
+  if [ -z "$tz" ] && [ -L /etc/localtime ]; then
+    # e.g. /etc/localtime -> /usr/share/zoneinfo/Asia/Shanghai
+    tz="$(readlink -f /etc/localtime 2>/dev/null | sed -n 's|.*/zoneinfo/||p' || true)"
+  fi
+  # This lands in .env unquoted and becomes the container's $TZ, so pass through
+  # only something shaped like a zone name.
+  case "$tz" in
+    ''|Local|*[!A-Za-z0-9/_+-]*) tz="" ;;
+  esac
+  printf '%s' "$tz"
+}
+
 # ---------- .env (idempotent: create once, then only apply explicit overrides) --
+FRESH_ENV=false
 if [ ! -f .env ]; then
   cp .env.example .env
+  FRESH_ENV=true
   log "created .env from .env.example"
 else
   log ".env already exists — keeping it"
@@ -138,6 +165,18 @@ set_env() { # set_env KEY VALUE — replace or append in .env
 [ -n "$PORT" ]          && set_env NETTACT_HTTP_PORT "$PORT"
 [ -n "$LITE_VERSION" ]  && set_env NETTACT_LITE_VERSION "$LITE_VERSION"
 [ -n "$AGENT_VERSION" ] && set_env NETTACT_AGENT_VERSION "$AGENT_VERSION"
+
+# Adopt the host's timezone on FIRST install only, so re-running the installer
+# never overwrites a zone the operator has since edited by hand.
+if [ "$FRESH_ENV" = true ]; then
+  HOST_TZ="$(host_timezone)"
+  if [ -n "$HOST_TZ" ]; then
+    set_env NETTACT_TZ "$HOST_TZ"
+    log "timezone: $HOST_TZ (change NETTACT_TZ in .env)"
+  else
+    warn "could not detect the host timezone — notification times will be UTC (set NETTACT_TZ in .env)"
+  fi
+fi
 
 HTTP_PORT="$(grep '^NETTACT_HTTP_PORT=' .env | tail -1 | cut -d= -f2 || true)"
 HTTP_PORT="${HTTP_PORT:-12450}"

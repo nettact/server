@@ -23,6 +23,13 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	// Embedded IANA timezone database. Notifications render their timestamps in
+	// this process's local zone, which Go resolves from $TZ against the system
+	// zoneinfo files — and the runtime image ships none, so without this a
+	// deployment that sets TZ=Asia/Shanghai would silently fall back to UTC and
+	// announce outages eight hours off. The embedded copy is only a fallback: a
+	// host that does provide zoneinfo (bind mount, distro package) still wins.
+	_ "time/tzdata"
 
 	"golang.org/x/term"
 
