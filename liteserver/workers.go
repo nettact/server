@@ -18,6 +18,7 @@ import (
 	"github.com/nettact/server-core/metrics"
 	"github.com/nettact/server-core/notifypolicy"
 	"github.com/nettact/server-core/registry"
+	"github.com/nettact/server-core/settings"
 )
 
 // workers owns every background goroutine on one context so shutdown is a single
@@ -129,6 +130,8 @@ type deps struct {
 	cleanup           *cleanup.Service
 	agentconnectivity *agentconnectivity.Engine
 	notifypolicy      *notifypolicy.Service
+	fault             *fault.Service
+	settings          *settings.Service
 	bus               *eventbus.Bus
 	hub               *agentws.Hub
 	ret               metrics.RetentionConfig
@@ -162,6 +165,25 @@ func startWorkers(w *workers, d deps) {
 		// evidence_expired while preserving the incident/alert/evidence summaries.
 		if err := d.incidentops.Retention(ctx); err != nil {
 			log.Printf("incidentops retention: %v", err)
+		}
+	})
+
+	// Fluctuation retention: diagnostics for availability dips, aged out wholesale
+	// except the ones a fault claimed as precursors, which PruneFluctuations leaves
+	// for the incident's own evidence retention to release.
+	//
+	// Startup-then-hourly for the same reason device retention is: a fluctuation is
+	// written for every recovered failing round, so this is one of the faster-growing
+	// tables in the store, and the desktop tray is routinely opened and closed inside
+	// an hour. On a plain hourly ticker the first tick would rarely arrive, and the
+	// configured retention would quietly never apply on exactly the deployment that
+	// generates the rows.
+	w.nowThenEvery(time.Hour, func(ctx context.Context) {
+		days, _ := d.settings.Int(ctx, settings.KeyFluctuationRetentionDays)
+		if n, err := d.fault.PruneFluctuations(ctx, time.Now().UTC().AddDate(0, 0, -days)); err != nil {
+			log.Printf("prune fluctuations: %v", err)
+		} else if n > 0 {
+			log.Printf("prune fluctuations: removed %d", n)
 		}
 	})
 

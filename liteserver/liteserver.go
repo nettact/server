@@ -534,6 +534,8 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		cleanup:           cleanupSvc,
 		agentconnectivity: agentConnEng,
 		notifypolicy:      policySvc,
+		fault:             faultSvc,
+		settings:          settingsSvc,
 		bus:               bus,
 		hub:               agentHub,
 		ret:               cfg.Retention,
