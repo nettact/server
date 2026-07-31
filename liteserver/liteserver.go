@@ -361,8 +361,8 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	// other.
 	policySvc := notifypolicy.New(db, notifSvc, settingsSvc, bus)
 	faultSvc.SetPlanner(policySvc)
-	if _, err := policySvc.EnsureDefault(ctx, site.DefaultSiteID); err != nil {
-		log.Printf("ensure default notification policy: %v", err)
+	if err := policySvc.EnsureBuiltins(ctx, site.DefaultSiteID); err != nil {
+		log.Printf("ensure built-in notification policies: %v", err)
 	}
 
 	// Config force-resolves the faults of removed/changed targets through the fault
