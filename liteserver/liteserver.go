@@ -341,6 +341,9 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 
 	// Leaf services the fault engine and orchestration build on.
 	metricsStore := metrics.New(db)
+	// The query side reasons about which rollup tier still holds data for a
+	// window's age; it must use the same windows the pruner deletes by.
+	metricsStore.SetRetention(cfg.Retention)
 	settingsSvc := settings.New(db)
 	notifSvc := notification.New(db, cfg.Desktop != nil && cfg.Desktop.NativeDeepLinks)
 
