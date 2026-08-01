@@ -7,14 +7,13 @@
 // download keeps failing) a minimal built-in placeholder page is served — the
 // API and agents are never blocked on the frontend.
 //
-// Desktop builds take the other path (NewEmbedded): the dist is compiled into
-// the executable and nothing is ever fetched, because Microsoft Store and App
-// Store review treat a runtime fetch of application content as downloading a
-// separate executable.
+// Desktop builds take the other path (NewPackaged): the dist is supplied from
+// files installed beside the executable or in the app bundle, and nothing is
+// ever fetched at runtime.
 package webui
 
 // Version is the exact web-console release tag this build serves — downloaded
-// at runtime by server builds, compiled in by desktop builds. Release builds
+// at runtime by server builds, packaged externally by desktop builds. Releases
 // stamp it via
 //
 //	-ldflags "-X github.com/nettact/server-lite/internal/webui.Version=v0.1.0"

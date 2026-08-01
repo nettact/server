@@ -82,13 +82,13 @@ type Config struct {
 	// filepath.Dir(DBPath) + "/webui". Ignored when WebUIFS is set.
 	WebUIDir string
 
-	// WebUIFS, when non-nil, is a built web-console dist compiled into the
-	// calling binary (index.html at its root). It is served directly and the
+	// WebUIFS, when non-nil, is a built web-console dist supplied by the host
+	// (index.html at its root). It is served directly and the
 	// runtime downloader is never started, so WebUIDir is unused.
 	//
 	// The desktop app sets this: Microsoft Store and App Store review read a
 	// runtime fetch of application content as downloading a separate
-	// executable, so packaged builds must ship the console inside the binary.
+	// executable, so packaged builds ship the console as application resources.
 	// Server deployments leave it nil and keep downloading, which is what lets
 	// the console update without reshipping the server image.
 	WebUIFS fs.FS
@@ -548,11 +548,12 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		bus.Subscribe(eventbus.TopicIncidentResolved, onIncidents)
 	}
 
-	// A bundled dist (desktop) is served straight from the binary; everything
-	// else resolves an installed version on disk and downloads in the background.
+	// A packaged dist (desktop) is served straight from the supplied fs.FS;
+	// everything else resolves an installed version on disk and downloads in the
+	// background.
 	var webuiMgr *webui.Manager
 	if cfg.WebUIFS != nil {
-		webuiMgr = webui.NewEmbedded(cfg.WebUIFS)
+		webuiMgr = webui.NewPackaged(cfg.WebUIFS)
 	} else {
 		webuiMgr = webui.New(cfg.WebUIDir, webui.Version)
 	}
@@ -738,7 +739,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 
 	webuiSrc := cfg.WebUIDir
 	if cfg.WebUIFS != nil {
-		webuiSrc = "embedded"
+		webuiSrc = "packaged"
 	}
 	log.Printf("nettact-lite %s listening on %s (dev=%v, db=%s, max_agents=%d, desktop=%v, webui=%s@%s)",
 		version.Version, ln.Addr(), cfg.Dev, cfg.DBPath, cfg.MaxAgents, cfg.Desktop != nil, webui.Version, webuiSrc)

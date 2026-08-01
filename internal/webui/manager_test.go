@@ -388,16 +388,16 @@ func TestLocalOverrideServesDirectly(t *testing.T) {
 	}
 }
 
-// The embedded path is what ships in the Store builds: it must serve the
-// bundled SPA and must never touch the network, even with Start called and a
+// The packaged path is what ships in desktop builds: it must serve the supplied
+// SPA and must never touch the network, even with Start called and a
 // non-dev version stamped.
-func TestEmbeddedServesBundledDistWithoutNetwork(t *testing.T) {
+func TestPackagedServesDistWithoutNetwork(t *testing.T) {
 	bundled := fstest.MapFS{
 		"index.html":    &fstest.MapFile{Data: []byte("<html>BUNDLED-SPA</html>")},
 		"assets/app.js": &fstest.MapFile{Data: []byte("js")},
 	}
 
-	m := NewEmbedded(bundled)
+	m := NewPackaged(bundled)
 	m.logf = t.Logf
 	m.client = nil // any download attempt would nil-panic rather than pass silently
 	m.Start()
@@ -416,86 +416,10 @@ func TestEmbeddedServesBundledDistWithoutNetwork(t *testing.T) {
 	}
 }
 
-// Once ci/fetchwebui has run, the embed directory holds a *released* console.
-// On a dev build that must not shadow the developer's own build: `go run` would
-// silently serve the release and local frontend edits would appear to do
-// nothing. A stamped (packaged) build keeps serving its embed, which is the
-// whole point of bundling and must not depend on the working directory.
-func TestEmbeddedDevPrefersSiblingDistButStampedDoesNot(t *testing.T) {
-	// Lay out <root>/web-console/dist next to a working directory, so the
-	// const defaultLocalDir ("../web-console/dist") resolves to it.
-	root := t.TempDir()
-	local := filepath.Join(root, "web-console", "dist")
-	if err := os.MkdirAll(local, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(local, "index.html"), []byte("<html>LOCAL-SPA</html>"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	work := filepath.Join(root, "desktop")
-	if err := os.MkdirAll(work, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(work)
-
-	embedded := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<html>EMBEDDED-SPA</html>")}}
-
-	for _, tc := range []struct {
-		version string
-		want    string
-	}{
-		{version: "dev", want: "LOCAL-SPA"},
-		{version: "v1.2.3", want: "EMBEDDED-SPA"},
-	} {
-		t.Run(tc.version, func(t *testing.T) {
-			prev := Version
-			Version = tc.version
-			defer func() { Version = prev }()
-
-			m := NewEmbedded(embedded)
-			m.logf = t.Logf
-			m.client = nil // a download attempt would nil-panic rather than pass silently
-
-			got := body(t, get(t, m.Handler(), "/"))
-			if !bytes.Contains([]byte(got), []byte(tc.want)) {
-				t.Fatalf("version %q served %q; want %s", tc.version, got, tc.want)
-			}
-		})
-	}
-}
-
-// An explicit NETTACT_WEBUI_LOCAL outranks the sibling-dist convenience path.
-func TestEmbeddedLocalEnvBeatsSiblingDist(t *testing.T) {
-	root := t.TempDir()
-	sibling := filepath.Join(root, "web-console", "dist")
-	explicit := filepath.Join(root, "explicit")
-	for dir, marker := range map[string]string{sibling: "SIBLING-SPA", explicit: "EXPLICIT-SPA"} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>"+marker+"</html>"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	work := filepath.Join(root, "desktop")
-	if err := os.MkdirAll(work, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(work)
-	t.Setenv(envLocalDir, explicit)
-
-	m := NewEmbedded(fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<html>EMBEDDED-SPA</html>")}})
-	m.logf = t.Logf
-
-	if got := body(t, get(t, m.Handler(), "/")); !bytes.Contains([]byte(got), []byte("EXPLICIT-SPA")) {
-		t.Fatalf("served %q; want the NETTACT_WEBUI_LOCAL dist", got)
-	}
-}
-
 // A build assembled without the fetch step must still start and serve the API;
 // the console degrades to a page that names the omission.
-func TestEmbeddedWithoutIndexServesMissingBundlePage(t *testing.T) {
-	m := NewEmbedded(fstest.MapFS{".gitkeep": &fstest.MapFile{}})
+func TestPackagedWithoutIndexServesMissingBundlePage(t *testing.T) {
+	m := NewPackaged(fstest.MapFS{".gitkeep": &fstest.MapFile{}})
 	m.logf = t.Logf
 	m.Start()
 	defer m.Close(context.Background())
@@ -506,23 +430,5 @@ func TestEmbeddedWithoutIndexServesMissingBundlePage(t *testing.T) {
 	}
 	if !bytes.Contains([]byte(body(t, resp)), []byte("NETTACT_WEBUI_LOCAL")) {
 		t.Fatal("missing-bundle page should name the local-dist escape hatch")
-	}
-}
-
-// NETTACT_WEBUI_LOCAL outranks the bundled dist so a developer can iterate
-// against a live Vite build without repacking the binary.
-func TestEmbeddedLocalOverrideWins(t *testing.T) {
-	local := t.TempDir()
-	if err := os.WriteFile(filepath.Join(local, "index.html"), []byte("LOCAL-DIST"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(envLocalDir, local)
-
-	m := NewEmbedded(fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("BUNDLED-SPA")}})
-	m.logf = t.Logf
-
-	resp := get(t, m.Handler(), "/")
-	if !bytes.Contains([]byte(body(t, resp)), []byte("LOCAL-DIST")) {
-		t.Fatal("local override should outrank the bundled dist")
 	}
 }

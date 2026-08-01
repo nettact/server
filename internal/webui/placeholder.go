@@ -61,7 +61,7 @@ code{background:#e2e8f0;padding:.1em .4em;border-radius:4px}
 <p>这是一个未完整打包的开发构建。API 与监控服务运行正常。</p>
 <p>This build was assembled without the web console. The API and monitoring
 services are running normally.</p>
-<p>Run <code>go run ./ci/fetchwebui</code> in the desktop repo before building,
+<p>Run <code>go run ./ci/fetchwebui</code> in the desktop repo before packaging,
 or point <code>NETTACT_WEBUI_LOCAL</code> at a built web-console dist and restart.</p>
 </main>
 </body>

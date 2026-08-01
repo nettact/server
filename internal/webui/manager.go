@@ -55,43 +55,21 @@ type Manager struct {
 	logf    func(format string, args ...any)
 }
 
-// NewEmbedded serves a dist compiled into the calling binary. Nothing is ever
-// downloaded and dir/version play no part: the SPA ships with the executable.
+// NewPackaged serves a dist supplied by the host as an fs.FS. Nothing is ever
+// downloaded and dir/version play no part: the host's installer or app bundle
+// is responsible for carrying the SPA files.
 //
 // This is the desktop path. Store review treats a runtime fetch of application
-// content as downloading a separate executable, so packaged builds must carry
-// the console in the binary rather than install it on first launch.
+// content as downloading a separate executable, so packaged builds carry the
+// console as application resources rather than install it on first launch.
 //
-// NETTACT_WEBUI_LOCAL still wins so a developer can iterate against a live Vite
-// build without repacking the binary — it reads local files and downloads
-// nothing. An fsys with no index.html means the build was assembled without the
-// fetch step; that serves the placeholder, which names the omission, instead of
-// failing the server start.
-//
-// Unstamped (dev) builds prefer a sibling ../web-console/dist over the embedded
-// copy, matching New. The embed directory is a packaging artifact: once anyone
-// has run ci/fetchwebui it holds a *released* console, which would otherwise
-// shadow the developer's own build on every `go run` with no hint as to why.
-// Packaged builds always stamp Version via ldflags, so they never consult a
-// relative path whose meaning depends on the working directory.
-func NewEmbedded(fsys fs.FS) *Manager {
+// The caller resolves any developer override before constructing fsys. An fsys
+// with no index.html serves the placeholder instead of failing server startup.
+func NewPackaged(fsys fs.FS) *Manager {
 	m := &Manager{
 		version: Version,
 		started: true, // nothing to download, ever
 		logf:    log.Printf,
-	}
-
-	if local := os.Getenv(envLocalDir); local != "" {
-		if hasIndex(os.DirFS(local)) {
-			m.store(spaHandler(os.DirFS(local)))
-			m.logf("webui: serving local dist from %s (%s)", local, envLocalDir)
-			return m
-		}
-		m.logf("webui: %s=%q has no index.html; ignoring", envLocalDir, local)
-	} else if Version == "dev" && hasIndex(os.DirFS(defaultLocalDir)) {
-		m.store(spaHandler(os.DirFS(defaultLocalDir)))
-		m.logf("webui: dev build, serving local dist from %s (embedded copy ignored)", defaultLocalDir)
-		return m
 	}
 
 	if fsys != nil && hasIndex(fsys) {
