@@ -39,6 +39,7 @@ import (
 	"github.com/nettact/server-core/config"
 	"github.com/nettact/server-core/eventbus"
 	"github.com/nettact/server-core/fault"
+	"github.com/nettact/server-core/gamedata"
 	"github.com/nettact/server-core/hostlive"
 	"github.com/nettact/server-core/identity"
 	"github.com/nettact/server-core/incident"
@@ -378,6 +379,9 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	auditSvc := audit.New(db)
 	// Inventory takes settings for the device retention windows (see its worker).
 	invSvc := inventory.New(db, settingsSvc)
+	// Game presentation history (runs + per-second buckets), likewise taking
+	// settings for its two retention windows.
+	gameSvc := gamedata.New(db, settingsSvc)
 	// Ingest evaluates the batch's probe rounds inside its own sample transaction
 	// (atomic telemetry + detector state), so it takes the fault engine as its
 	// Evaluator.
@@ -531,6 +535,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		registry:          reg,
 		incidentops:       incidentOps,
 		inventory:         invSvc,
+		gamedata:          gameSvc,
 		cleanup:           cleanupSvc,
 		agentconnectivity: agentConnEng,
 		notifypolicy:      policySvc,
@@ -609,6 +614,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		Config:            cfgSvc,
 		Site:              siteSvc,
 		Inventory:         invSvc,
+		GameData:          gameSvc,
 		Fault:             faultSvc,
 		NotifyPolicy:      policySvc,
 		Incident:          incidentSvc,

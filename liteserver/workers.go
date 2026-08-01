@@ -11,6 +11,7 @@ import (
 	"github.com/nettact/server-core/cleanup"
 	"github.com/nettact/server-core/eventbus"
 	"github.com/nettact/server-core/fault"
+	"github.com/nettact/server-core/gamedata"
 	"github.com/nettact/server-core/identity"
 	"github.com/nettact/server-core/incidentops"
 	"github.com/nettact/server-core/ingest"
@@ -127,6 +128,7 @@ type deps struct {
 	registry          *registry.Service
 	incidentops       *incidentops.Service
 	inventory         *inventory.Service
+	gamedata          *gamedata.Service
 	cleanup           *cleanup.Service
 	agentconnectivity *agentconnectivity.Engine
 	notifypolicy      *notifypolicy.Service
@@ -199,6 +201,21 @@ func startWorkers(w *workers, d deps) {
 			log.Printf("device retention: %v", err)
 		} else if n > 0 {
 			log.Printf("device retention: %d stale device(s) removed", n)
+		}
+	})
+
+	// Game data retention: per-second buckets on a short window, runs on a long one.
+	// Buckets are the fastest-growing rows in the store — one per second a game is
+	// presenting frames, so an evening of play is thousands — which is also why this
+	// runs at startup rather than only hourly: the desktop tray is routinely opened
+	// and closed inside an hour, and on a plain ticker the configured window would
+	// quietly never apply on exactly the machines that generate the rows.
+	w.nowThenEvery(time.Hour, func(ctx context.Context) {
+		buckets, runs, err := d.gamedata.Retention(ctx)
+		if err != nil {
+			log.Printf("game data retention: %v", err)
+		} else if buckets > 0 || runs > 0 {
+			log.Printf("game data retention: removed %d bucket(s) and %d run(s)", buckets, runs)
 		}
 	})
 
