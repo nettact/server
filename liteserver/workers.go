@@ -219,6 +219,21 @@ func startWorkers(w *workers, d deps) {
 		}
 	})
 
+	// Abandoned-run sweep. A run's ending is written by the agent, so a force-kill,
+	// crash or power cut leaves it open forever: the agent is dead at the moment the
+	// orphan is created, and by the time it is back it has forgotten the run, so the
+	// server is the only party left that can close it. Every minute rather than
+	// hourly because the wrong state is on screen — the console reads a missing
+	// ending as "in progress", and an abandoned run then sits above newer finished
+	// ones claiming to still be playing.
+	w.every(time.Minute, func(ctx context.Context) {
+		if n, err := d.gamedata.CloseAbandonedRuns(ctx); err != nil {
+			log.Printf("game run reap: %v", err)
+		} else if n > 0 {
+			log.Printf("game run reap: closed %d abandoned run(s)", n)
+		}
+	})
+
 	// Incident snapshot/trace maintenance on a short managed interval: finalize
 	// snapshots past their deadline, time out expired traces, close orphaned
 	// cohorts and rehydrate the eligible queued trace work. Idempotent and cheap
