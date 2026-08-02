@@ -1,12 +1,22 @@
 #!/usr/bin/env bash
-# NetTact one-click installer (Linux; requires Docker Engine 24+ with Compose v2).
+# NetTact Lite one-click installer (Linux; requires Docker Engine 24+ with Compose v2).
 #
-# One-click (downloads compose assets from https://d.nettact.org into the
-# current directory, then deploys server + local agent):
+# Installs the SERVER, and only the server. Agents are installed per monitored
+# machine — including this one, if you want it monitored — by their own
+# installer: https://d.nettact.org/agent/install.sh, driven by an enrollment
+# token minted on the console's Agent page. Bundling one in here made a local
+# agent look like part of the server rather than a deliberate choice about which
+# machines are watched, and it enrolled that agent by logging in as the admin.
+#
+# Everything lands in ~/nettact (override with NETTACT_INSTALL_DIR), NOT in the
+# directory the script was run from: the deployment outlives the shell that
+# created it, so its compose file and .env need one predictable home that is
+# neither a git working tree nor whichever directory someone happened to be in.
 #
 #   curl -fsSL https://d.nettact.org/install.sh | bash
 #
-# From a NetTact superproject checkout:
+# From a NetTact superproject checkout (the checkout's own compose file and
+# .env.example are copied into the install directory instead of downloaded):
 #
 #   ./server-lite/deploy/install.sh
 #
@@ -14,42 +24,37 @@
 #
 #   ./deploy/install.sh
 #
-# The script is idempotent: existing .env, secrets and data volumes are kept;
+# The script is idempotent: an existing .env and the data volume are kept;
 # re-running after a partial failure is safe.
 set -euo pipefail
 
 # ---------- defaults ----------------------------------------------------------
 PORT=""                 # host port; empty = keep .env / default 12450
 LITE_VERSION=""         # NETTACT_LITE_VERSION override
-AGENT_VERSION=""        # NETTACT_AGENT_VERSION override
-SERVER_ONLY=false
-HOST_NETWORK=false
-ASSUME_YES=false
-AUTO_UPDATE=false
+# Where the deployment lives. Resolved after argument parsing so the error for a
+# missing HOME can name the escape hatch.
+INSTALL_DIR="${NETTACT_INSTALL_DIR:-}"
 # Where to fetch docker-compose.yml / .env.example when not present locally
 # (also serves this script itself: curl -fsSL https://d.nettact.org/install.sh | bash).
 DIST_BASE_URL="${NETTACT_DIST_BASE_URL:-https://d.nettact.org}"
 
 usage() {
   cat <<'EOF'
-NetTact installer
+NetTact Lite installer — deploys the server via docker compose.
 
 Usage: install.sh [options]
 
-Full deploy (default: server + local agent via docker compose):
   --port <n>            host port for the web console (writes NETTACT_HTTP_PORT)
   --lite-version <tag>  server image tag  (writes NETTACT_LITE_VERSION)
-  --agent-version <tag> agent image tag   (writes NETTACT_AGENT_VERSION)
-  --server-only         deploy only the server
-  --host-network        agent monitors the DOCKER HOST network (Linux only;
-                        leaves the compose network — see docs/deploy.md §9)
-  --auto-update         check daily for a new Agent image and restart it
-  -y, --yes             no confirmation prompts
-
-Remote Agent install:
-  https://d.nettact.org/agent/install.sh (Linux, macOS, and Docker)
-
   -h, --help            this help
+
+Environment:
+  NETTACT_INSTALL_DIR   where to install (default: ~/nettact)
+  NETTACT_DIST_BASE_URL where to download the compose assets from
+
+No agent is installed here. Install one on each machine you want monitored,
+with a token minted on the console's Agent page:
+  https://d.nettact.org/agent/install.sh (Linux, macOS, and Docker)
 EOF
 }
 
@@ -62,16 +67,10 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --port)          PORT="${2:?--port needs a value}"; shift 2 ;;
     --lite-version)  LITE_VERSION="${2:?}"; shift 2 ;;
-    --agent-version) AGENT_VERSION="${2:?}"; shift 2 ;;
-    --server-only)   SERVER_ONLY=true; shift ;;
-    --host-network)  HOST_NETWORK=true; shift ;;
-    --auto-update)   AUTO_UPDATE=true; shift ;;
-    -y|--yes)        ASSUME_YES=true; shift ;;
     -h|--help)       usage; exit 0 ;;
     *) die "unknown option: $1 (see --help)" ;;
   esac
 done
-$SERVER_ONLY && $AUTO_UPDATE && die "--auto-update only applies when an agent is installed"
 
 # ---------- preflight ----------------------------------------------------------
 command -v docker >/dev/null 2>&1 || die "docker not found — install Docker Engine 24+ first (https://docs.docker.com/engine/install/)"
@@ -89,35 +88,91 @@ fetch() { # fetch <url> <dest>
   else die "need curl or wget to download $1"; fi
 }
 
-# http <curl-args...> — thin wrapper; the whole script standardizes on curl for
-# API calls (wget stays a fallback for plain file downloads only).
-http() { curl -fsS "$@"; }
-
-# json_str <s> — escape backslashes and double quotes for embedding in JSON.
-json_str() { local s="${1//\\/\\\\}"; printf '%s' "${s//\"/\\\"}"; }
-
-enable_agent_auto_update() {
-  log "enabling daily automatic Agent image updates"
-  docker rm -f nettact-agent-updater >/dev/null 2>&1 || true
-  docker run -d --name nettact-agent-updater --restart unless-stopped \
-    -v /var/run/docker.sock:/var/run/docker.sock \
-    containrrr/watchtower:latest \
-    --cleanup --interval 86400 nettact-agent >/dev/null
+# probe <url> — GET the URL, discarding the body. curl or wget, whichever is
+# installed: nothing here needs curl specifically any more.
+probe() {
+  if command -v curl >/dev/null 2>&1; then curl -fsS "$1" >/dev/null
+  else wget -qO- "$1" >/dev/null; fi
 }
 
-# ---------- full deploy: locate / fetch compose assets --------------------------
-# Prefer files already present (git checkout or previous install) — never overwrite.
-if [ ! -f docker-compose.yml ]; then
-  log "docker-compose.yml not found — downloading from $DIST_BASE_URL"
-  fetch "$DIST_BASE_URL/docker-compose.yml" docker-compose.yml \
-    || die "cannot fetch docker-compose.yml; run this script from a NetTact checkout or set NETTACT_DIST_BASE_URL"
-fi
-if [ ! -f .env.example ] && [ ! -f .env ]; then
-  fetch "$DIST_BASE_URL/.env.example" .env.example \
-    || die "cannot fetch .env.example; run from a NetTact checkout or set NETTACT_DIST_BASE_URL"
+docker compose version >/dev/null 2>&1 || die "Docker Compose v2 ('docker compose') not available — the legacy v1 'docker-compose' is not supported"
+
+# ---------- install directory ---------------------------------------------------
+# Candidate sources for the compose assets, captured BEFORE the cd below and in
+# preference order: the current directory first (someone standing in a checkout
+# means that checkout), then the superproject root two levels above this script
+# — server-lite/deploy/install.sh — for the case where the script is invoked by
+# path from elsewhere.
+SRC_DIRS=("$PWD")
+add_src() {
+  local d
+  d="$(cd "$1" 2>/dev/null && pwd)" || return 0
+  case " ${SRC_DIRS[*]} " in *" $d "*) return 0 ;; esac
+  SRC_DIRS+=("$d")
+}
+# Only when there IS a script path. Piped into bash (curl | bash) BASH_SOURCE is
+# "bash" or unset, dirname of it is ".", and "./../.." would then be two levels
+# above whatever directory the operator happened to be standing in — a stray
+# docker-compose.yml up there is not this project's and must never be deployed.
+if [ -f "${BASH_SOURCE[0]:-}" ]; then
+  SELF_DIR="$(dirname "${BASH_SOURCE[0]}")"
+  add_src "$SELF_DIR/../.."
+  add_src "$SELF_DIR"
 fi
 
-docker compose version >/dev/null 2>&1 || die "Docker Compose v2 ('docker compose') not available — the legacy v1 'docker-compose' is not supported"
+if [ -z "$INSTALL_DIR" ]; then
+  [ -n "${HOME:-}" ] || die "HOME is not set — pass NETTACT_INSTALL_DIR=<dir> to choose where to install"
+  INSTALL_DIR="$HOME/nettact"
+fi
+mkdir -p "$INSTALL_DIR" || die "cannot create the install directory $INSTALL_DIR"
+INSTALL_DIR="$(cd "$INSTALL_DIR" && pwd)"
+
+# An install done from some other directory is not just "somewhere else": compose
+# derives the project name from the directory, so that deployment's containers
+# and — crucially — its DATA VOLUME belong to a different project, invisible from
+# here, while its fixed container_name still occupies the name this one needs.
+# Deploying anyway would either collide on the name or quietly start a second
+# server on an empty database. Neither is something to discover afterwards.
+PREV_DIR="$(docker inspect nettact-lite \
+  --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' 2>/dev/null || true)"
+case "$PREV_DIR" in '<no value>') PREV_DIR="" ;; esac
+if [ -n "$PREV_DIR" ] && [ "$PREV_DIR" != "$INSTALL_DIR" ]; then
+  die "a NetTact server is already deployed from $PREV_DIR, and this installer now installs into $INSTALL_DIR.
+  Its database lives in that deployment's own docker volume, so installing here would start a SECOND, empty server.
+  Pick one:
+    * keep the existing location:  re-run this script with NETTACT_INSTALL_DIR=$PREV_DIR
+    * manage it where it is:       cd $PREV_DIR && docker compose ps
+    * start fresh here (the old database is NOT carried over, and the old volume is left behind):
+                                   cd $PREV_DIR && docker compose down, then re-run this script"
+fi
+
+# provide <name> — ensure $INSTALL_DIR/<name> exists. An existing file is kept
+# untouched (an operator may have edited it, and .env is generated from the
+# example only once), otherwise the first local copy is copied in, otherwise it
+# is downloaded. Copying rather than deploying in place is the point: a checkout
+# is a working tree that gets pulled and rewritten under a running deployment.
+provide() {
+  local name="$1" d
+  [ -f "$INSTALL_DIR/$name" ] && return 0
+  for d in "${SRC_DIRS[@]}"; do
+    [ "$d" = "$INSTALL_DIR" ] && continue
+    [ -f "$d/$name" ] || continue
+    cp "$d/$name" "$INSTALL_DIR/$name" || return 1
+    log "copied $name from $d"
+    return 0
+  done
+  log "downloading $name from $DIST_BASE_URL"
+  fetch "$DIST_BASE_URL/$name" "$INSTALL_DIR/$name"
+}
+
+log "installing into $INSTALL_DIR"
+provide docker-compose.yml \
+  || die "cannot obtain docker-compose.yml; run this script from a NetTact checkout or set NETTACT_DIST_BASE_URL"
+if [ ! -f "$INSTALL_DIR/.env" ]; then
+  provide .env.example \
+    || die "cannot obtain .env.example; run this script from a NetTact checkout or set NETTACT_DIST_BASE_URL"
+fi
+cd "$INSTALL_DIR"
 
 # host_timezone — the host's IANA zone name, or empty if it cannot be determined.
 # The times PEOPLE read (notification bodies, log lines) are printed in the
@@ -162,9 +217,8 @@ set_env() { # set_env KEY VALUE — replace or append in .env
     printf '%s=%s\n' "$1" "$2" >> .env
   fi
 }
-[ -n "$PORT" ]          && set_env NETTACT_HTTP_PORT "$PORT"
-[ -n "$LITE_VERSION" ]  && set_env NETTACT_LITE_VERSION "$LITE_VERSION"
-[ -n "$AGENT_VERSION" ] && set_env NETTACT_AGENT_VERSION "$AGENT_VERSION"
+[ -n "$PORT" ]         && set_env NETTACT_HTTP_PORT "$PORT"
+[ -n "$LITE_VERSION" ] && set_env NETTACT_LITE_VERSION "$LITE_VERSION"
 
 # Adopt the host's timezone on FIRST install only, so re-running the installer
 # never overwrites a zone the operator has since edited by hand.
@@ -182,46 +236,6 @@ HTTP_PORT="$(grep '^NETTACT_HTTP_PORT=' .env | tail -1 | cut -d= -f2 || true)"
 HTTP_PORT="${HTTP_PORT:-12450}"
 BASE_URL="http://127.0.0.1:$HTTP_PORT"
 
-# ---------- host-network override (explicit opt-in; see docs/deploy.md §9) ------
-if $HOST_NETWORK; then
-  if [ ! -f docker-compose.override.yml ]; then
-    cat > docker-compose.override.yml <<EOF
-# Written by install.sh --host-network: the agent monitors the DOCKER HOST's
-# real interfaces. It leaves the compose network, so it reaches the server via
-# the host-published port instead of the service name. Delete this file to
-# return to the default (container-scoped) agent.
-services:
-  agent:
-    network_mode: host
-    environment:
-      NETTACT_AGENT_SERVER_URL: http://127.0.0.1:$HTTP_PORT
-EOF
-    log "wrote docker-compose.override.yml (agent uses host networking)"
-  else
-    warn "docker-compose.override.yml already exists — not touching it"
-  fi
-fi
-# Future note: the current Linux agent build needs NO extra capabilities
-# (no NET_RAW, non-root). If a future version adds ICMP probes / active
-# discovery, that will be a documented opt-in here — never a silent default.
-
-# ---------- secrets placeholder (compose refuses to start without the file) -----
-# PERMISSIONS, and why the token file is 0644 rather than 0600: outside swarm,
-# compose implements a file secret as a plain bind mount of THIS file, and
-# silently ignores the `uid`/`gid`/`mode` secret options — so the host's owner
-# and mode are exactly what the container sees. The agent image runs as a
-# non-root user (uid 100), which cannot open a 0600 file owned by the root that
-# ran this installer; the agent would restart-loop on "permission denied".
-#
-# Confidentiality comes from the DIRECTORY instead: 0700 stops every other local
-# user from reaching the token, while the container gets to the file through the
-# bind mount, which does not walk the host directory. chmod is also what repairs
-# a 0600 file left by an earlier install, so re-running this script fixes it.
-mkdir -p secrets
-chmod 700 secrets 2>/dev/null || true
-[ -f secrets/agent_enroll_token ] || : > secrets/agent_enroll_token
-chmod 644 secrets/agent_enroll_token 2>/dev/null || true
-
 # ---------- start server & wait for health --------------------------------------
 log "starting server (docker compose up -d server)…"
 docker compose up -d server
@@ -229,7 +243,7 @@ docker compose up -d server
 log "waiting for $BASE_URL/api/v1/healthz …"
 HEALTHY=false
 for _ in $(seq 1 60); do
-  if http "$BASE_URL/api/v1/healthz" >/dev/null 2>&1; then HEALTHY=true; break; fi
+  if probe "$BASE_URL/api/v1/healthz" >/dev/null 2>&1; then HEALTHY=true; break; fi
   sleep 2
 done
 $HEALTHY || { docker compose logs --tail 40 server >&2 || true; die "server did not become healthy in 120s (logs above; check the port and 'docker compose ps')"; }
@@ -244,86 +258,10 @@ if [ -n "$FIRSTRUN" ]; then
   ADMIN_PASS="$(printf '%s\n' "$FIRSTRUN" | sed -n 's/.*password: //p' | head -1)"
 fi
 
-if $SERVER_ONLY; then
-  log "server-only deploy done."
-  echo
-  echo "  Console:  http://<this-host>:$HTTP_PORT"
-  if [ -n "$ADMIN_PASS" ]; then
-    echo "  Login:    $ADMIN_USER / $ADMIN_PASS   (printed once — change it in Settings)"
-  else
-    echo "  Login:    use your existing admin credentials"
-  fi
-  exit 0
-fi
-
-# ---------- enroll the agent automatically ---------------------------------------
-AGENT_RUNNING="$(docker compose ps --status running --services 2>/dev/null | grep -cx agent || true)"
-if [ "$AGENT_RUNNING" = "1" ]; then
-  log "agent service already running — skipping enrollment (idempotent re-run)"
-else
-  if [ -z "$ADMIN_PASS" ]; then
-    # Not a first run (password was changed / logs rotated): ask, unless -y.
-    if $ASSUME_YES; then
-      warn "cannot determine the admin password automatically (not a first run)."
-      warn "mint a token in the console (Agent page), then:"
-      warn "  printf '%s' '<token>' > secrets/agent_enroll_token && docker compose up -d agent"
-      exit 1
-    fi
-    printf 'Admin username [admin]: '; read -r ADMIN_USER; ADMIN_USER="${ADMIN_USER:-admin}"
-    printf 'Admin password (input hidden): '; read -rs ADMIN_PASS; echo
-    [ -n "$ADMIN_PASS" ] || die "empty password"
-  fi
-
-  command -v curl >/dev/null 2>&1 \
-    || die "curl is required for automatic enrollment. Manual flow: mint a token in the console (Agent page), then:
-  printf '%s' '<token>' > secrets/agent_enroll_token && docker compose up -d agent"
-
-  COOKIES="$(mktemp)"; trap 'rm -f "$COOKIES"' EXIT
-  log "logging in to mint a one-time enrollment token…"
-  # Credentials go through stdin (never argv), so they don't show up in `ps`.
-  if ! printf '{"username":"%s","password":"%s"}' "$(json_str "$ADMIN_USER")" "$(json_str "$ADMIN_PASS")" \
-      | http -c "$COOKIES" -H 'Content-Type: application/json' -d @- \
-        "$BASE_URL/api/v1/auth/login" >/dev/null; then
-    die "login failed. Fallback: log in to http://<host>:$HTTP_PORT, mint a token (Agent page), then:
-  printf '%s' '<token>' > secrets/agent_enroll_token && docker compose up -d agent"
-  fi
-
-  TOKEN_JSON="$(printf '{"note":"install.sh","ttl_minutes":60}' \
-    | http -b "$COOKIES" -H 'Content-Type: application/json' -d @- \
-      "$BASE_URL/api/v1/enrollment-tokens")" \
-    || die "minting the enrollment token failed (see the console's Agent page for the manual flow)"
-  ENROLL_TOKEN="$(printf '%s' "$TOKEN_JSON" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"
-  [ -n "$ENROLL_TOKEN" ] || die "could not parse the token from the API response: $TOKEN_JSON"
-
-  printf '%s' "$ENROLL_TOKEN" > secrets/agent_enroll_token
-  chmod 644 secrets/agent_enroll_token 2>/dev/null || true   # readable by the agent's non-root uid; see the secrets block above
-  log "token written to secrets/agent_enroll_token (valid 60 minutes, single use)"
-
-  log "starting agent (docker compose up -d agent)…"
-  docker compose up -d agent
-
-  # Verify enrollment: the agent must show up in the server's agent list.
-  ENROLLED=false
-  for _ in $(seq 1 30); do
-    AGENTS="$(http -b "$COOKIES" "$BASE_URL/api/v1/agents" 2>/dev/null || echo '[]')"
-    if [ "$AGENTS" != "[]" ] && [ -n "$AGENTS" ]; then ENROLLED=true; break; fi
-    sleep 2
-  done
-  http -b "$COOKIES" -X POST "$BASE_URL/api/v1/auth/logout" >/dev/null 2>&1 || true
-  if $ENROLLED; then
-    log "agent enrolled and visible in the console ✔"
-  else
-    docker compose logs --tail 30 agent >&2 || true
-    warn "agent not visible yet — check 'docker compose logs -f agent' (token expired? re-run this script)"
-  fi
-fi
-
-$AUTO_UPDATE && enable_agent_auto_update
-
 # ---------- summary ---------------------------------------------------------------
 echo
 echo "──────────────────────────────────────────────────────────"
-echo "  NetTact is up."
+echo "  NetTact Lite is up."
 echo "  Console:   http://<this-host>:$HTTP_PORT"
 if [ -n "$ADMIN_PASS" ]; then
   echo "  Login:     $ADMIN_USER / $ADMIN_PASS"
@@ -331,6 +269,13 @@ if [ -n "$ADMIN_PASS" ]; then
 else
   echo "  Login:     your existing admin credentials"
 fi
+echo "  Directory: $INSTALL_DIR   (run docker compose from here)"
 echo "  Status:    docker compose ps"
 echo "  Docs:      docs/deploy.md · docs/server-config.md · docs/agent-config.md"
+echo
+echo "  No agent is installed — nothing is being monitored yet. On each"
+echo "  machine you want to watch, mint a token on the console's Agent page"
+echo "  and run:"
+echo "    curl -fsSL $DIST_BASE_URL/agent/install.sh | sudo bash -s -- \\"
+echo "      --server-url http://<this-host>:$HTTP_PORT --token <token>"
 echo "──────────────────────────────────────────────────────────"
