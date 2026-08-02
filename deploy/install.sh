@@ -44,7 +44,9 @@ NetTact Lite installer — deploys the server via docker compose.
 
 Usage: install.sh [options]
 
-  --port <n>            host port for the web console (writes NETTACT_HTTP_PORT)
+  --port <n>            host port for the web console (writes NETTACT_HTTP_PORT).
+                        Accepts an address to publish on, too, e.g.
+                        10.0.0.5:12450 to expose it on one interface only
   --lite-version <tag>  server image tag  (writes NETTACT_LITE_VERSION)
   -h, --help            this help
 
@@ -232,9 +234,34 @@ if [ "$FRESH_ENV" = true ]; then
   fi
 fi
 
-HTTP_PORT="$(grep '^NETTACT_HTTP_PORT=' .env | tail -1 | cut -d= -f2 || true)"
-HTTP_PORT="${HTTP_PORT:-12450}"
-BASE_URL="http://127.0.0.1:$HTTP_PORT"
+# NETTACT_HTTP_PORT is interpolated into the HOST side of the compose port
+# mapping, and compose accepts an address there — `100.64.70.192:12450` publishes
+# on that interface only. So the value is not necessarily a port, and pasting it
+# after "127.0.0.1:" produced `http://127.0.0.1:100.64.70.192:12450`. Worse than
+# the ugly URL: when a bind address IS given, 127.0.0.1 is not listening at all,
+# so the health check could only ever time out and call the install a failure.
+HTTP_PUBLISH="$(grep '^NETTACT_HTTP_PORT=' .env | tail -1 | cut -d= -f2- || true)"
+HTTP_PUBLISH="${HTTP_PUBLISH:-12450}"
+case "$HTTP_PUBLISH" in
+  # Rightmost colon: the address may be IPv6 in brackets ([::1]:12450), where
+  # every other colon belongs to the address.
+  *:*) HTTP_PORT="${HTTP_PUBLISH##*:}"; BIND_ADDR="${HTTP_PUBLISH%:*}" ;;
+  *)   HTTP_PORT="$HTTP_PUBLISH";       BIND_ADDR="" ;;
+esac
+case "$HTTP_PORT" in
+  ''|*[!0-9]*) die "NETTACT_HTTP_PORT=$HTTP_PUBLISH is not a port. Use a port (12450), or an address to publish on (127.0.0.1:12450, 10.0.0.5:12450)." ;;
+esac
+# A wildcard bind names no reachable address, so it stays the placeholder for the
+# reader and loopback for the probe; a specific one is both. The IPv6 wildcard
+# probes over IPv6: docker publishes it on `::` only, and reaching that through
+# 127.0.0.1 relies on the host's ipv6-mapped-v4 default — where it is off, the
+# container is healthy while the probe times out and the install reports failure.
+case "$BIND_ADDR" in
+  ''|0.0.0.0)     PROBE_HOST="127.0.0.1"; CONSOLE_HOST="<this-host>" ;;
+  '::'|'[::]')    PROBE_HOST="[::1]";     CONSOLE_HOST="<this-host>" ;;
+  *)              PROBE_HOST="$BIND_ADDR"; CONSOLE_HOST="$BIND_ADDR" ;;
+esac
+BASE_URL="http://$PROBE_HOST:$HTTP_PORT"
 
 # ---------- start server & wait for health --------------------------------------
 log "starting server (docker compose up -d server)…"
@@ -262,7 +289,7 @@ fi
 echo
 echo "──────────────────────────────────────────────────────────"
 echo "  NetTact Lite is up."
-echo "  Console:   http://<this-host>:$HTTP_PORT"
+echo "  Console:   http://$CONSOLE_HOST:$HTTP_PORT"
 if [ -n "$ADMIN_PASS" ]; then
   echo "  Login:     $ADMIN_USER / $ADMIN_PASS"
   echo "             (generated on first run, printed ONCE — change it in Settings)"
@@ -277,5 +304,5 @@ echo "  No agent is installed — nothing is being monitored yet. On each"
 echo "  machine you want to watch, mint a token on the console's Agent page"
 echo "  and run:"
 echo "    curl -fsSL $DIST_BASE_URL/agent/install.sh | sudo bash -s -- \\"
-echo "      --server-url http://<this-host>:$HTTP_PORT --token <token>"
+echo "      --server-url http://$CONSOLE_HOST:$HTTP_PORT --token <token>"
 echo "──────────────────────────────────────────────────────────"
