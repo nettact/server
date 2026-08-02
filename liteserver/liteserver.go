@@ -609,6 +609,10 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		errCh:       make(chan error, 1),
 	}
 
+	// Where this process runs decides whether the listen-address control is the
+	// operator's to use at all (see container.go). Probed once, here.
+	container := detectContainer()
+
 	apiDeps := api.Deps{
 		Identity:          idSvc,
 		Registry:          reg,
@@ -644,6 +648,8 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 				Desktop:       cfg.Desktop != nil,
 				FallbackFrom:  s.listen.fallbackFrom,
 				OverridesFlag: s.listen.source == "db" && cfg.AddrFromFlag,
+				Container:     container.inContainer,
+				NetworkMode:   container.networkMode,
 			}
 		},
 	}
