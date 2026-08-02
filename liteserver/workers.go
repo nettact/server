@@ -204,18 +204,20 @@ func startWorkers(w *workers, d deps) {
 		}
 	})
 
-	// Game data retention: per-second buckets on a short window, runs on a long one.
-	// Buckets are the fastest-growing rows in the store — one per second a game is
-	// presenting frames, so an evening of play is thousands — which is also why this
-	// runs at startup rather than only hourly: the desktop tray is routinely opened
-	// and closed inside an hour, and on a plain ticker the configured window would
-	// quietly never apply on exactly the machines that generate the rows.
+	// Game data retention: per-second rows on a short window, runs on a long one.
+	// The per-second rows are the fastest-growing in the store — one bucket per
+	// second a game is presenting frames plus one machine reading per second the
+	// sensor is watching anything, so an evening of play is thousands — which is
+	// also why this runs at startup rather than only hourly: the desktop tray is
+	// routinely opened and closed inside an hour, and on a plain ticker the
+	// configured window would quietly never apply on exactly the machines that
+	// generate the rows.
 	w.nowThenEvery(time.Hour, func(ctx context.Context) {
-		buckets, runs, err := d.gamedata.Retention(ctx)
+		seconds, runs, err := d.gamedata.Retention(ctx)
 		if err != nil {
 			log.Printf("game data retention: %v", err)
-		} else if buckets > 0 || runs > 0 {
-			log.Printf("game data retention: removed %d bucket(s) and %d run(s)", buckets, runs)
+		} else if seconds > 0 || runs > 0 {
+			log.Printf("game data retention: removed %d per-second row(s) and %d run(s)", seconds, runs)
 		}
 	})
 
