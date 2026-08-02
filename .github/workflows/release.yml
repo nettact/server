@@ -316,7 +316,6 @@ jobs:
             dist-bins/SHA256SUMS
             dist-out/nettact-lite-dependencies.json
             dist-out/nettact-lite-dependencies.json.sha256
-            server-lite/deploy/install.sh
           body: |
             ## nettact-lite ${{ inputs.tag || github.ref_name }}
 

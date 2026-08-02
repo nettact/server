@@ -206,9 +206,21 @@ fi
 # discovery, that will be a documented opt-in here — never a silent default.
 
 # ---------- secrets placeholder (compose refuses to start without the file) -----
+# PERMISSIONS, and why the token file is 0644 rather than 0600: outside swarm,
+# compose implements a file secret as a plain bind mount of THIS file, and
+# silently ignores the `uid`/`gid`/`mode` secret options — so the host's owner
+# and mode are exactly what the container sees. The agent image runs as a
+# non-root user (uid 100), which cannot open a 0600 file owned by the root that
+# ran this installer; the agent would restart-loop on "permission denied".
+#
+# Confidentiality comes from the DIRECTORY instead: 0700 stops every other local
+# user from reaching the token, while the container gets to the file through the
+# bind mount, which does not walk the host directory. chmod is also what repairs
+# a 0600 file left by an earlier install, so re-running this script fixes it.
 mkdir -p secrets
+chmod 700 secrets 2>/dev/null || true
 [ -f secrets/agent_enroll_token ] || : > secrets/agent_enroll_token
-chmod 600 secrets/agent_enroll_token 2>/dev/null || true
+chmod 644 secrets/agent_enroll_token 2>/dev/null || true
 
 # ---------- start server & wait for health --------------------------------------
 log "starting server (docker compose up -d server)…"
@@ -284,7 +296,7 @@ else
   [ -n "$ENROLL_TOKEN" ] || die "could not parse the token from the API response: $TOKEN_JSON"
 
   printf '%s' "$ENROLL_TOKEN" > secrets/agent_enroll_token
-  chmod 600 secrets/agent_enroll_token 2>/dev/null || true
+  chmod 644 secrets/agent_enroll_token 2>/dev/null || true   # readable by the agent's non-root uid; see the secrets block above
   log "token written to secrets/agent_enroll_token (valid 60 minutes, single use)"
 
   log "starting agent (docker compose up -d agent)…"
