@@ -1,36 +1,53 @@
-# server-lite
+# NetTact Lite
 
-## 一键部署
+English | [简体中文](./README-zh.md)
+
+NetTact Lite is an all-in-one network monitoring server for homes, small offices, and self-hosted deployments. It combines NetTact Server Core, the HTTP API, Agent connectivity, fault detection, notifications, and the web console in a lightweight service backed by a single SQLite database by default.
+
+Agents run on monitored devices, execute probes from each device's location, and actively push telemetry. Lite centrally distributes monitoring targets, stores history, detects faults, and presents the results. The Server does not scan the network itself and never needs to initiate a connection to an Agent.
+
+## When to Use It
+
+- Monitor network quality across a home, studio, or small office.
+- Manage PCs, servers, NAS devices, routers, and remote machines from one place.
+- Keep configuration, metrics, incidents, and notifications on infrastructure you control.
+- Retain latency, packet-loss, DNS, HTTP, host, and Wi-Fi history.
+- Investigate outages with incidents, path diagnostics, fluctuations, and availability history.
+
+Lite uses a single-admin, single-site model and supports up to 50 Agents. For an all-in-one experience on one computer, use [NetTact Desktop](https://nettact.org/en/desktop).
+
+## Key Advantages
+
+- **Simple to operate**: one server application, one SQLite database, and one web console, with no external database required.
+- **Endpoint perspective**: Agents execute probes where users and devices actually connect.
+- **Outbound-only Agents**: no Agent ports are exposed, which works well with NAT, firewalls, dynamic IPs, and remote networks.
+- **Data ownership**: configuration, metrics, events, and alerts stay in your own storage.
+- **Explainable incidents**: availability is complemented by incident evidence, fluctuations, traceroutes, and notification history.
+- **Cross-platform collection**: Windows, Linux, macOS, and Docker Agents can report to one Lite server.
+- **Low operational overhead**: amd64/arm64 container images include health checks, database migrations, and graceful shutdown.
+
+## Deployment and Usage
+
+Operational guidance is maintained in the NetTact documentation:
+
+- [Deployment](https://nettact.org/en/deploy): Docker Compose, self-hosting, first login, remote Agents, host monitoring, status, upgrades, backup and restore, uninstall, HTTPS, and troubleshooting.
+- [Server configuration](https://nettact.org/en/server-config): every command-line option and environment variable, listeners, administrator credentials, retention, TLS, session cookies, and web-console resources.
+- [Agent configuration](https://nettact.org/en/agent-config): Agent installation on each platform, enrollment tokens, permissions, probe-access scope, and operations.
+- [Permission reference](https://nettact.org/en/permissions): Agent capabilities, permission presets, and platform differences.
+
+Treat these pages and `nettact-lite --help` as the source of truth for deployment commands, version options, and operational procedures. They are intentionally not duplicated in this README.
+
+## Building from Source
+
+The project requires Go 1.25 and sibling `protocol` and `server-core` modules in the same NetTact workspace. With the root `go.work` configured:
 
 ```bash
-curl -fsSL https://d.nettact.org/install.sh | bash
+go test ./...
+go build -o nettact-lite ./cmd/nettact-lite
 ```
 
-脚本源码位于 [`deploy/install.sh`](./deploy/install.sh)，完整说明见 [部署文档](../docs/deploy.md)。
+The `liteserver` package can also be embedded in another Go program. NetTact Desktop uses the same startup, database, and service-orchestration implementation.
 
-运行:
+## License
 
-```
-go run ./cmd/nettact-lite --db ./nettact.db --addr :12450 --dev
-```
-
-- 单用户、无租户;首启自动创建管理员并打印一次性密码(登录后 Settings 改密,
-  或 `nettact-lite passwd -db <路径>` 离线重置)。
-- **全部 flag 参考、监听地址优先级、数据保留、TLS 与会话 Cookie**:见
-  **[docs/server-config.md](../docs/server-config.md)**;单一事实来源为
-  `nettact-lite --help`。
-- Web UI **运行时自动下载**:发布流水线自动解析
-  [web-console](https://github.com/nettact/web-console) 的最新稳定 Release,
-  用 ldflags 把该精确 tag 烧入二进制(版本不需要手工维护);
-  首次启动检测到前端缺失时从其公开 GitHub Release 下载(SHA256 校验)到
-  `-webui-dir`(默认 `<db 目录>/webui`)。下载完成前非 `/api` 路径返回内置
-  占位页(503),API 与探针不受影响。
-  - desktop 走另一条路:前端在打包时直接编译进二进制、运行时不下载
-    (微软商店/苹果商店审核会把运行时拉取应用内容视为下载其他可执行文件)。
-  - 开发构建(未烧版本,`Version=dev`)不下载;设 `NETTACT_WEBUI_LOCAL`
-    指向本地构建好的 dist 即可直接服务。
-  - 镜像/内网部署可用 `NETTACT_WEBUI_BASE_URL` 覆盖下载源,或预置
-    `<webui-dir>/<version>/` 目录。
-- `--dev` 开放 CORS 便于本地对接 Vite(web-console)。
-
-依赖 [github.com/nettact/protocol](https://github.com/nettact/protocol) 与 [github.com/nettact/server-core](https://github.com/nettact/server-core)。本地多仓开发使用 `go.work`。
+[GNU Affero General Public License v3.0](./LICENSE)
