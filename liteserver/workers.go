@@ -140,8 +140,21 @@ type deps struct {
 }
 
 func startWorkers(w *workers, d deps) {
-	// Downsampling: raw → 1m/1h/1d rollups.
-	w.every(time.Minute, func(ctx context.Context) {
+	// Downsampling: raw → 1m/1h/1d rollups. Five minutes, not one: every run
+	// rewrites each active series' tail page in every tier (SQLite page-level
+	// write amplification), so the cadence is a direct multiplier on steady-state
+	// disk writes. Freshness does not ride on it — charts up to 2h read the raw
+	// tier (pickTier), so the rollups only serve windows long enough that a
+	// ≤5-minute right edge is invisible.
+	//
+	// Startup-then-every for the same reason the retention workers use it: at the
+	// old one-minute cadence a missed first tick cost a minute, but five minutes
+	// is long enough to matter on a desktop tray that is routinely opened and
+	// closed inside it — a short session would then never roll up at all, and
+	// every session would start with up to five minutes of raw samples missing
+	// from the tiers that serve >2h charts. The catch-up run is bounded by the
+	// per-series watermarks, so doing it at startup is cheap when nothing is due.
+	w.nowThenEvery(5*time.Minute, func(ctx context.Context) {
 		if err := d.metrics.Rollup(ctx); err != nil {
 			log.Printf("rollup: %v", err)
 		}
