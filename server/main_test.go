@@ -1,4 +1,4 @@
-package liteserver
+package server
 
 import (
 	"os"

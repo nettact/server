@@ -1,10 +1,10 @@
-# NetTact Lite
+# NetTact Server
 
 [English](./README.md) | 简体中文
 
-NetTact Lite 是面向家庭、小型办公室和自托管用户的一体化网络监控服务器。它把 NetTact Server Core、HTTP API、Agent 连接服务、故障判断、通知和 Web 控制台组织在一个轻量服务中，默认只需要一个 SQLite 数据库。
+NetTact Server 是面向家庭、小型办公室和自托管用户的一体化网络监控服务器。它把 NetTact Server Core、HTTP API、Agent 连接服务、故障判断、通知和 Web 控制台组织在一个轻量服务中，默认只需要一个 SQLite 数据库。
 
-Agent 安装在需要监控的设备上，从设备所在的位置执行网络探测并主动上传数据；Lite 负责集中下发监控目标、保存历史、判断故障并展示结果。服务端不会主动扫描网络，也不需要从公网连接到 Agent。
+Agent 安装在需要监控的设备上，从设备所在的位置执行网络探测并主动上传数据；服务端负责集中下发监控目标、保存历史、判断故障并展示结果。服务端不会主动扫描网络，也不需要从公网连接到 Agent。
 
 ## 适合什么场景
 
@@ -14,7 +14,7 @@ Agent 安装在需要监控的设备上，从设备所在的位置执行网络�
 - 需要长期保存延迟、丢包、DNS、HTTP、主机和 Wi-Fi 指标
 - 需要故障事件、路径诊断、通知策略和历史可用率
 
-Lite 使用单管理员、单站点模式，最多管理 50 个 Agent。需要免部署的单机体验时，可改用 [NetTact Desktop](https://nettact.org/zh/desktop)。
+服务端使用单管理员、单站点模式，最多管理 50 个 Agent。需要免部署的单机体验时，可改用 [NetTact Desktop](https://nettact.org/zh/desktop)。
 
 ## 核心优势
 
@@ -35,7 +35,7 @@ NetTact 的操作说明统一维护在用户文档：
 - [Agent 配置](https://nettact.org/zh/agent-config)：各平台 Agent 安装、注册令牌、权限、探测访问范围和运行维护。
 - [权限参考](https://nettact.org/zh/permissions)：Agent 能力、权限预设和平台支持差异。
 
-实际部署命令、版本参数和运维步骤请以这些文档以及 `nettact-lite --help` 为准。README 不重复维护，以免升级流程变化后出现两套说明。
+实际部署命令、版本参数和运维步骤请以这些文档以及 `nettact-server --help` 为准。README 不重复维护，以免升级流程变化后出现两套说明。
 
 ## 从源码构建
 
@@ -43,10 +43,10 @@ NetTact 的操作说明统一维护在用户文档：
 
 ```bash
 go test ./...
-go build -o nettact-lite ./cmd/nettact-lite
+go build -o nettact-server ./cmd/nettact-server
 ```
 
-`liteserver` 包也可以嵌入其他 Go 程序。NetTact Desktop 使用的就是同一套启动、数据库和服务编排逻辑。
+`server` 包也可以嵌入其他 Go 程序。NetTact Desktop 使用的就是同一套启动、数据库和服务编排逻辑。
 
 ## 许可证
 

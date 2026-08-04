@@ -1,11 +1,11 @@
-// Command nettact-lite is the self-hosted Lite server: a single binary that
+// Command nettact-server is the self-hosted server: a single binary that
 // wires the server-core modules over one SQLite database (architecture §7). It
-// is a thin wrapper over the liteserver runtime package — it parses flags,
-// installs signal handling, and calls liteserver.Start/Shutdown. All
+// is a thin wrapper over the server runtime package — it parses flags,
+// installs signal handling, and calls server.Start/Shutdown. All
 // orchestration (DB, admin bootstrap, services, workers, listener) lives in
-// liteserver, shared with the desktop all-in-one build.
+// server, shared with the desktop all-in-one build.
 //
-// The `passwd` subcommand (nettact-lite passwd -db <path>) resets the admin
+// The `passwd` subcommand (nettact-server passwd -db <path>) resets the admin
 // password out of band for lost-password recovery, reading the new password
 // interactively so it never reaches the shell history or process list.
 package main
@@ -35,8 +35,8 @@ import (
 
 	"github.com/nettact/server-core/identity"
 	"github.com/nettact/server-core/store"
-	"github.com/nettact/server-lite/internal/version"
-	"github.com/nettact/server-lite/liteserver"
+	"github.com/nettact/server/internal/version"
+	"github.com/nettact/server/server"
 )
 
 // maxAgents caps enrolled agents. Lite targets a home/SMB fleet well under this,
@@ -70,7 +70,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Println("nettact-lite", version.Version)
+		fmt.Println("nettact-server", version.Version)
 		return
 	}
 
@@ -105,7 +105,7 @@ func main() {
 		secure = false // dev mode always serves the Vite origin over plain http
 	}
 
-	srv, err := liteserver.Start(context.Background(), liteserver.Config{
+	srv, err := server.Start(context.Background(), server.Config{
 		Addr:         *addr,
 		AddrFromFlag: addrFromFlag,
 		TLSCert:      *tlsCert,
@@ -117,7 +117,7 @@ func main() {
 		Dev:          *dev,
 		SecureCookie: secure,
 		MaxAgents:    maxAgents,
-		// Retention stays zero: liteserver fills in the standard windows.
+		// Retention stays zero: server fills in the standard windows.
 		// Desktop stays nil: standalone Lite exposes no one-time-login endpoint and
 		// keeps the default -addr :12450 bind.
 	})
@@ -141,7 +141,7 @@ func main() {
 	}
 }
 
-// runPasswd implements `nettact-lite passwd -db <path>`: it reads a new password
+// runPasswd implements `nettact-server passwd -db <path>`: it reads a new password
 // interactively (never via a flag, so it stays out of the shell history and the
 // process list), then resets the single admin's password directly in the
 // database and invalidates every existing session.

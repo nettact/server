@@ -1,4 +1,4 @@
-package liteserver
+package server
 
 import (
 	"context"
@@ -18,7 +18,7 @@ import (
 )
 
 // TestInProcessEnrollAndDial proves the desktop in-memory path end to end at the
-// liteserver boundary: mint a token, EnrollAgent directly (no HTTP), then
+// server boundary: mint a token, EnrollAgent directly (no HTTP), then
 // DialAgent (no WebSocket) and run the full Hello→DesiredState→Packet→Ack flow.
 func TestInProcessEnrollAndDial(t *testing.T) {
 	dbPath := filepath.Join(storetest.Dir(t), "inproc.db")

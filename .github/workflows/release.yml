@@ -1,11 +1,11 @@
-# Release pipeline for server-lite.
+# Release pipeline for the server.
 #
 # Trigger: pushing a semver tag (v1.0.0, v1.0.0-rc.1). Versioning is independent of
 # agent/desktop.
 #
 # Dependency sources: nothing is pinned in this repo. protocol and server-core are
 # checked out from their default branches and the commits that land are recorded in
-# nettact-lite-dependencies.json, published with the Release. Releases therefore
+# nettact-server-dependencies.json, published with the Release. Releases therefore
 # never wait on a sibling tag and nobody hand-maintains a SHA.
 #
 # The trade: a tag no longer rebuilds identically on its own, because the siblings
@@ -41,13 +41,13 @@ on:
         description: >-
           protocol commit to build against. Empty resolves the default branch's
           latest commit. When re-releasing an existing tag, pass the commit from
-          that release's nettact-lite-dependencies.json.
+          that release's nettact-server-dependencies.json.
         required: false
       server_core_ref:
         description: >-
           server-core commit to build against. Empty resolves the default branch's
           latest commit. When re-releasing an existing tag, pass the commit from
-          that release's nettact-lite-dependencies.json.
+          that release's nettact-server-dependencies.json.
         required: false
       web_console_version:
         description: >-
@@ -79,7 +79,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref_name }}
-          path: server-lite
+          path: server
           fetch-depth: 0          # need all tags to decide whether this is the newest stable
 
       # workflow_dispatch runs from a branch ref, so github.sha is the DISPATCH commit,
@@ -90,7 +90,7 @@ jobs:
         id: rel
         run: |
           set -euo pipefail
-          cd server-lite
+          cd server
           TAG="${{ inputs.tag || github.ref_name }}"
           SHA=$(git rev-parse HEAD)
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
@@ -169,7 +169,7 @@ jobs:
       # With no committed pins, the dependency record IS the audit trail: it is the
       # only place that says which sibling sources this binary contains. Published
       # as a Release asset so it outlives the workflow run's log retention, and read
-      # by desktop packaging to build server-lite against the same sources.
+      # by desktop packaging to build the server against the same sources.
       - name: Record dependency commits
         id: deps
         run: |
@@ -201,7 +201,7 @@ jobs:
             --arg web_console_version "${{ steps.webui.outputs.version }}" \
             '{
               schema_version: 1,
-              "server-lite": {version: $version, commit: $commit},
+              "server": {version: $version, commit: $commit},
               sources: {
                 protocol: {commit: $protocol_sha},
                 "server-core": {commit: $server_core_sha}
@@ -209,12 +209,12 @@ jobs:
               dependencies: {
                 "web-console": {version: $web_console_version}
               }
-            }' > dist-out/nettact-lite-dependencies.json
+            }' > dist-out/nettact-server-dependencies.json
           (
             cd dist-out
-            sha256sum nettact-lite-dependencies.json > nettact-lite-dependencies.json.sha256
+            sha256sum nettact-server-dependencies.json > nettact-server-dependencies.json.sha256
           )
-          cat dist-out/nettact-lite-dependencies.json
+          cat dist-out/nettact-server-dependencies.json
           {
             echo "## Resolved dependency sources"
             echo
@@ -227,31 +227,31 @@ jobs:
         with:
           go-version: '1.25'
           cache-dependency-path: |
-            server-lite/go.sum
+            server/go.sum
             server-core/go.sum
             protocol/go.sum
 
       - name: Assemble workspace (trimmed go.work + versioned replaces)
         run: |
           set -euo pipefail
-          go work init ./protocol ./server-core ./server-lite
+          go work init ./protocol ./server-core ./server
           go work edit -replace github.com/nettact/protocol@v0.0.0-00010101000000-000000000000=./protocol
           go work edit -replace github.com/nettact/server-core@v0.0.0-00010101000000-000000000000=./server-core
 
-      - name: Gate — vet · build · test (server-lite + server-core)
+      - name: Gate — vet · build · test (server + server-core)
         run: |
           set -euo pipefail
           ( cd server-core && go vet ./... && go build ./... && go test ./... )
-          ( cd server-lite && go vet ./... && go build ./... && go test ./... )
+          ( cd server && go vet ./... && go build ./... && go test ./... )
 
       - name: Cross-compile binaries + checksums
         run: |
           set -euo pipefail
           mkdir -p dist-bins
           for arch in amd64 arm64; do
-            ( cd server-lite && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
-                go build -trimpath -ldflags "-s -w -X github.com/nettact/server-lite/internal/webui.Version=${{ steps.webui.outputs.version }} -X github.com/nettact/server-lite/internal/version.Version=${{ inputs.tag || github.ref_name }}" \
-                -o "../dist-bins/nettact-lite-linux-$arch" ./cmd/nettact-lite )
+            ( cd server && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
+                go build -trimpath -ldflags "-s -w -X github.com/nettact/server/internal/webui.Version=${{ steps.webui.outputs.version }} -X github.com/nettact/server/internal/version.Version=${{ inputs.tag || github.ref_name }}" \
+                -o "../dist-bins/nettact-server-linux-$arch" ./cmd/nettact-server )
           done
           ( cd dist-bins && sha256sum * > SHA256SUMS && cat SHA256SUMS )
 
@@ -269,7 +269,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/nettact-lite
+          images: ghcr.io/${{ github.repository_owner }}/nettact-server
           tags: |
             type=raw,value=${{ inputs.tag || github.ref_name }}
             type=raw,value=latest,enable=${{ steps.rel.outputs.is_latest }}
@@ -280,7 +280,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: server-lite/ci/Dockerfile
+          file: server/ci/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -291,15 +291,15 @@ jobs:
             WEBUI_VERSION=${{ steps.webui.outputs.version }}
           provenance: true
           sbom: true
-          cache-from: type=gha,scope=lite
-          cache-to: type=gha,mode=max,scope=lite
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,mode=max,scope=server
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
       - name: Sign image (keyless, by digest)
         env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/nettact-lite
+          IMAGE: ghcr.io/${{ github.repository_owner }}/nettact-server
           DIGEST: ${{ steps.build.outputs.digest }}
         run: cosign sign --yes "${IMAGE}@${DIGEST}"
 
@@ -311,13 +311,13 @@ jobs:
           fail_on_unmatched_files: true
           prerelease: ${{ contains(inputs.tag || github.ref_name, '-') }}
           files: |
-            dist-bins/nettact-lite-linux-amd64
-            dist-bins/nettact-lite-linux-arm64
+            dist-bins/nettact-server-linux-amd64
+            dist-bins/nettact-server-linux-arm64
             dist-bins/SHA256SUMS
-            dist-out/nettact-lite-dependencies.json
-            dist-out/nettact-lite-dependencies.json.sha256
+            dist-out/nettact-server-dependencies.json
+            dist-out/nettact-server-dependencies.json.sha256
           body: |
-            ## nettact-lite ${{ inputs.tag || github.ref_name }}
+            ## nettact-server ${{ inputs.tag || github.ref_name }}
 
             Built against:
             - `nettact/protocol@${{ steps.deps.outputs.protocol_sha }}`
@@ -325,7 +325,7 @@ jobs:
             - web-console **${{ steps.webui.outputs.version }}** (downloaded by the server at runtime)
 
             The Go sources above were resolved from their default branches when this
-            build started; `nettact-lite-dependencies.json` is the machine-readable
+            build started; `nettact-server-dependencies.json` is the machine-readable
             record of it. Desktop packaging reads that record to build this server
             against the same sources, and re-releasing this tag reproducibly means
             passing those commits as the workflow's `protocol_ref` / `server_core_ref`
@@ -333,6 +333,6 @@ jobs:
 
             ### Container image (linux/amd64 · linux/arm64, cosign-signed)
             ```
-            docker pull ghcr.io/${{ github.repository_owner }}/nettact-lite:${{ inputs.tag || github.ref_name }}
+            docker pull ghcr.io/${{ github.repository_owner }}/nettact-server:${{ inputs.tag || github.ref_name }}
             ```
             Verify binary integrity with `sha256sum -c SHA256SUMS`.

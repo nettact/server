@@ -1,10 +1,10 @@
-# NetTact Lite
+# NetTact Server
 
 English | [简体中文](./README-zh.md)
 
-NetTact Lite is an all-in-one network monitoring server for homes, small offices, and self-hosted deployments. It combines NetTact Server Core, the HTTP API, Agent connectivity, fault detection, notifications, and the web console in a lightweight service backed by a single SQLite database by default.
+NetTact Server is an all-in-one network monitoring server for homes, small offices, and self-hosted deployments. It combines NetTact Server Core, the HTTP API, Agent connectivity, fault detection, notifications, and the web console in a lightweight service backed by a single SQLite database by default.
 
-Agents run on monitored devices, execute probes from each device's location, and actively push telemetry. Lite centrally distributes monitoring targets, stores history, detects faults, and presents the results. The Server does not scan the network itself and never needs to initiate a connection to an Agent.
+Agents run on monitored devices, execute probes from each device's location, and actively push telemetry. The server centrally distributes monitoring targets, stores history, detects faults, and presents the results. The Server does not scan the network itself and never needs to initiate a connection to an Agent.
 
 ## When to Use It
 
@@ -14,7 +14,7 @@ Agents run on monitored devices, execute probes from each device's location, and
 - Retain latency, packet-loss, DNS, HTTP, host, and Wi-Fi history.
 - Investigate outages with incidents, path diagnostics, fluctuations, and availability history.
 
-Lite uses a single-admin, single-site model and supports up to 50 Agents. For an all-in-one experience on one computer, use [NetTact Desktop](https://nettact.org/en/desktop).
+The server uses a single-admin, single-site model and supports up to 50 Agents. For an all-in-one experience on one computer, use [NetTact Desktop](https://nettact.org/en/desktop).
 
 ## Key Advantages
 
@@ -23,7 +23,7 @@ Lite uses a single-admin, single-site model and supports up to 50 Agents. For an
 - **Outbound-only Agents**: no Agent ports are exposed, which works well with NAT, firewalls, dynamic IPs, and remote networks.
 - **Data ownership**: configuration, metrics, events, and alerts stay in your own storage.
 - **Explainable incidents**: availability is complemented by incident evidence, fluctuations, traceroutes, and notification history.
-- **Cross-platform collection**: Windows, Linux, macOS, and Docker Agents can report to one Lite server.
+- **Cross-platform collection**: Windows, Linux, macOS, and Docker Agents can report to one server.
 - **Low operational overhead**: amd64/arm64 container images include health checks, database migrations, and graceful shutdown.
 
 ## Deployment and Usage
@@ -35,7 +35,7 @@ Operational guidance is maintained in the NetTact documentation:
 - [Agent configuration](https://nettact.org/en/agent-config): Agent installation on each platform, enrollment tokens, permissions, probe-access scope, and operations.
 - [Permission reference](https://nettact.org/en/permissions): Agent capabilities, permission presets, and platform differences.
 
-Treat these pages and `nettact-lite --help` as the source of truth for deployment commands, version options, and operational procedures. They are intentionally not duplicated in this README.
+Treat these pages and `nettact-server --help` as the source of truth for deployment commands, version options, and operational procedures. They are intentionally not duplicated in this README.
 
 ## Building from Source
 
@@ -43,10 +43,10 @@ The project requires Go 1.25 and sibling `protocol` and `server-core` modules in
 
 ```bash
 go test ./...
-go build -o nettact-lite ./cmd/nettact-lite
+go build -o nettact-server ./cmd/nettact-server
 ```
 
-The `liteserver` package can also be embedded in another Go program. NetTact Desktop uses the same startup, database, and service-orchestration implementation.
+The `server` package can also be embedded in another Go program. NetTact Desktop uses the same startup, database, and service-orchestration implementation.
 
 ## License
 

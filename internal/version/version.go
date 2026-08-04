@@ -1,4 +1,4 @@
-// Package version carries this server-lite build's own release tag.
+// Package version carries this server build's own release tag.
 //
 // It is deliberately separate from internal/webui.Version, which names the
 // web-console release the build serves — two different things that ship on two
@@ -7,7 +7,7 @@
 //
 // Release builds stamp it:
 //
-//	-ldflags "-X github.com/nettact/server-lite/internal/version.Version=v1.2.3"
+//	-ldflags "-X github.com/nettact/server/internal/version.Version=v1.2.3"
 //
 // An unstamped build stays "dev", which the update check treats as older than
 // every release.

@@ -16,7 +16,7 @@ package webui
 // at runtime by server builds, packaged externally by desktop builds. Releases
 // stamp it via
 //
-//	-ldflags "-X github.com/nettact/server-lite/internal/webui.Version=v0.1.0"
+//	-ldflags "-X github.com/nettact/server/internal/webui.Version=v0.1.0"
 //
 // with the tag each release pipeline resolves from web-console's latest stable
 // GitHub Release. "dev" (unstamped) disables downloading: the Manager serves

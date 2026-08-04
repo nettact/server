@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# NetTact Lite one-click installer (Linux; requires Docker Engine 24+ with Compose v2).
+# NetTact Server one-click installer (Linux; requires Docker Engine 24+ with Compose v2).
 #
 # Installs the SERVER, and only the server. Agents are installed per monitored
 # machine — including this one, if you want it monitored — by their own
@@ -20,7 +20,7 @@
 #
 #   ./server-lite/deploy/install.sh
 #
-# From a standalone server-lite checkout:
+# From a standalone server checkout:
 #
 #   ./deploy/install.sh
 #
@@ -30,7 +30,7 @@ set -euo pipefail
 
 # ---------- defaults ----------------------------------------------------------
 PORT=""                 # host port; empty = keep .env / default 12450
-LITE_VERSION=""         # NETTACT_LITE_VERSION override
+SERVER_VERSION=""       # NETTACT_SERVER_VERSION override
 # Where the deployment lives. Resolved after argument parsing so the error for a
 # missing HOME can name the escape hatch.
 INSTALL_DIR="${NETTACT_INSTALL_DIR:-}"
@@ -40,15 +40,15 @@ DIST_BASE_URL="${NETTACT_DIST_BASE_URL:-https://d.nettact.org}"
 
 usage() {
   cat <<'EOF'
-NetTact Lite installer — deploys the server via docker compose.
+NetTact Server installer — deploys the server via docker compose.
 
 Usage: install.sh [options]
 
-  --port <n>            host port for the web console (writes NETTACT_HTTP_PORT).
-                        Accepts an address to publish on, too, e.g.
-                        10.0.0.5:12450 to expose it on one interface only
-  --lite-version <tag>  server image tag  (writes NETTACT_LITE_VERSION)
-  -h, --help            this help
+  --port <n>              host port for the web console (writes NETTACT_HTTP_PORT).
+                          Accepts an address to publish on, too, e.g.
+                          10.0.0.5:12450 to expose it on one interface only
+  --server-version <tag>  server image tag  (writes NETTACT_SERVER_VERSION)
+  -h, --help              this help
 
 Environment:
   NETTACT_INSTALL_DIR   where to install (default: ~/nettact)
@@ -67,9 +67,9 @@ die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 # ---------- argument parsing ---------------------------------------------------
 while [ $# -gt 0 ]; do
   case "$1" in
-    --port)          PORT="${2:?--port needs a value}"; shift 2 ;;
-    --lite-version)  LITE_VERSION="${2:?}"; shift 2 ;;
-    -h|--help)       usage; exit 0 ;;
+    --port)            PORT="${2:?--port needs a value}"; shift 2 ;;
+    --server-version)  SERVER_VERSION="${2:?}"; shift 2 ;;
+    -h|--help)         usage; exit 0 ;;
     *) die "unknown option: $1 (see --help)" ;;
   esac
 done
@@ -135,7 +135,7 @@ INSTALL_DIR="$(cd "$INSTALL_DIR" && pwd)"
 # here, while its fixed container_name still occupies the name this one needs.
 # Deploying anyway would either collide on the name or quietly start a second
 # server on an empty database. Neither is something to discover afterwards.
-PREV_DIR="$(docker inspect nettact-lite \
+PREV_DIR="$(docker inspect nettact-server \
   --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' 2>/dev/null || true)"
 case "$PREV_DIR" in '<no value>') PREV_DIR="" ;; esac
 if [ -n "$PREV_DIR" ] && [ "$PREV_DIR" != "$INSTALL_DIR" ]; then
@@ -219,8 +219,8 @@ set_env() { # set_env KEY VALUE — replace or append in .env
     printf '%s=%s\n' "$1" "$2" >> .env
   fi
 }
-[ -n "$PORT" ]         && set_env NETTACT_HTTP_PORT "$PORT"
-[ -n "$LITE_VERSION" ] && set_env NETTACT_LITE_VERSION "$LITE_VERSION"
+[ -n "$PORT" ]           && set_env NETTACT_HTTP_PORT "$PORT"
+[ -n "$SERVER_VERSION" ] && set_env NETTACT_SERVER_VERSION "$SERVER_VERSION"
 
 # Adopt the host's timezone on FIRST install only, so re-running the installer
 # never overwrites a zone the operator has since edited by hand.
@@ -288,7 +288,7 @@ fi
 # ---------- summary ---------------------------------------------------------------
 echo
 echo "──────────────────────────────────────────────────────────"
-echo "  NetTact Lite is up."
+echo "  NetTact Server is up."
 echo "  Console:   http://$CONSOLE_HOST:$HTTP_PORT"
 if [ -n "$ADMIN_PASS" ]; then
   echo "  Login:     $ADMIN_USER / $ADMIN_PASS"

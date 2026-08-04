@@ -1,4 +1,4 @@
-package liteserver
+package server
 
 import (
 	"crypto/rand"
@@ -23,7 +23,7 @@ const maxOutstandingLoginTokens = 16
 
 // ErrNotDesktop is returned by MintLoginURL when the server was not started in
 // desktop mode (the one-time-login surface only exists then).
-var ErrNotDesktop = errors.New("liteserver: login URLs require desktop mode")
+var ErrNotDesktop = errors.New("server: login URLs require desktop mode")
 
 // LoginTargetKind names the in-console destination a one-time login lands on.
 // The zero value is the console root, which is what a plain tray activation

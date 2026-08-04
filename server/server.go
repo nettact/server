@@ -1,7 +1,7 @@
-// Package liteserver is the Lite server as an importable library: one Start that
+// Package server is the server as an importable library: one Start that
 // opens the SQLite database, bootstraps the single admin, wires every
 // server-core service, binds its own listener, and serves the HTTP/WS surface
-// plus the runtime-downloaded Vue console. The standalone nettact-lite command
+// plus the runtime-downloaded Vue console. The standalone nettact-server command
 // and the desktop all-in-one both drive the same code through this package — the
 // command is a thin flags→Config wrapper, and the desktop passes a non-nil
 // Desktop config to enable loopback-only one-time browser login.
@@ -10,7 +10,7 @@
 // and returns a ready *Server: a nil error from Start is readiness — the listener
 // is bound and the console is reachable. Teardown happens exclusively through
 // Shutdown, never by cancelling the ctx passed to Start.
-package liteserver
+package server
 
 import (
 	"context"
@@ -57,8 +57,8 @@ import (
 	"github.com/nettact/server-core/store"
 	"github.com/nettact/server-core/targetstatus"
 	"github.com/nettact/server-core/updatecheck"
-	"github.com/nettact/server-lite/internal/version"
-	"github.com/nettact/server-lite/internal/webui"
+	"github.com/nettact/server/internal/version"
+	"github.com/nettact/server/internal/webui"
 )
 
 // Config drives one Start. Zero values select the documented defaults.
@@ -162,7 +162,7 @@ type DesktopConfig struct {
 	OnUpdate func(updatecheck.Status)
 }
 
-// Server is a running Lite server. It owns the listener, HTTP server, agent hub,
+// Server is a running server instance. It owns the listener, HTTP server, agent hub,
 // background workers, and SQLite handle; Shutdown releases them in order.
 type Server struct {
 	cfg     Config
@@ -193,7 +193,7 @@ type Server struct {
 
 // ErrListen marks a bind failure from Start (port in use, permission denied).
 // The desktop host matches it with errors.Is to show a port-specific dialog.
-var ErrListen = errors.New("liteserver: listen failed")
+var ErrListen = errors.New("server: listen failed")
 
 // listenResolution is the outcome of the DB > flag > default listen-address
 // resolution, reported through server-info.
@@ -331,7 +331,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 			"    username: %s\n"+
 			"    password: %s\n"+
 			"  This password is printed ONCE. Log in and change it in Settings\n"+
-			"  (or run `nettact-lite passwd`).\n"+
+			"  (or run `nettact-server passwd`).\n"+
 			"========================================================================",
 			admin.Username, generatedPass)
 	}
@@ -756,7 +756,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	if cfg.WebUIFS != nil {
 		webuiSrc = "packaged"
 	}
-	log.Printf("nettact-lite %s listening on %s (dev=%v, db=%s, max_agents=%d, desktop=%v, webui=%s@%s)",
+	log.Printf("nettact-server %s listening on %s (dev=%v, db=%s, max_agents=%d, desktop=%v, webui=%s@%s)",
 		version.Version, ln.Addr(), cfg.Dev, cfg.DBPath, cfg.MaxAgents, cfg.Desktop != nil, webui.Version, webuiSrc)
 
 	// Nothing can fail Start past this point, so the background download loop
@@ -894,7 +894,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			// The shutdown deadline fired before every worker returned; a worker may
 			// still be mid-write, so closing the DB now would be a use-after-close.
 			// Leave the handle open (the process exits shortly after) and report it.
-			err = errors.New("liteserver: workers did not stop within the shutdown deadline; DB left open to avoid use-after-close")
+			err = errors.New("server: workers did not stop within the shutdown deadline; DB left open to avoid use-after-close")
 		}
 	})
 	return err
@@ -943,27 +943,27 @@ func incidentEventData(siteID, incidentID string) []byte {
 // at save time.)
 func validate(cfg Config) error {
 	if cfg.Addr == "" {
-		return errors.New("liteserver: Addr is required")
+		return errors.New("server: Addr is required")
 	}
 	host, port, err := net.SplitHostPort(cfg.Addr)
 	if err != nil {
-		return fmt.Errorf("liteserver: invalid Addr %q: %w", cfg.Addr, err)
+		return fmt.Errorf("server: invalid Addr %q: %w", cfg.Addr, err)
 	}
 	if (cfg.TLSCert == "") != (cfg.TLSKey == "") {
-		return errors.New("liteserver: TLSCert and TLSKey must be set together")
+		return errors.New("server: TLSCert and TLSKey must be set together")
 	}
 	if cfg.Desktop != nil {
 		ip := net.ParseIP(host)
 		if ip == nil || !ip.IsLoopback() {
-			return fmt.Errorf("liteserver: desktop mode requires a loopback host, got %q", host)
+			return fmt.Errorf("server: desktop mode requires a loopback host, got %q", host)
 		}
 		if n, err := strconv.Atoi(port); err != nil || n < 0 || n > 65535 {
 			// Port 0 (OS-assigned) stays allowed for tests; the desktop app passes
 			// the fixed default 12450.
-			return fmt.Errorf("liteserver: desktop mode requires a numeric port, got %q", port)
+			return fmt.Errorf("server: desktop mode requires a numeric port, got %q", port)
 		}
 		if cfg.TLSCert != "" {
-			return errors.New("liteserver: desktop mode does not use TLS")
+			return errors.New("server: desktop mode does not use TLS")
 		}
 	}
 	return nil

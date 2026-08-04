@@ -1,4 +1,4 @@
-package liteserver
+package server
 
 import (
 	"context"
@@ -23,7 +23,7 @@ func releaseCatalog(t *testing.T, serverTag, agentTag string) *httptest.Server {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"products": []map[string]string{
-			{"id": "server-lite", "latestTag": serverTag},
+			{"id": "server", "latestTag": serverTag},
 			{"id": "desktop", "latestTag": "v9.9.9"},
 			{"id": "agent", "latestTag": agentTag},
 		}})

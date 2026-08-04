@@ -1,4 +1,4 @@
-module github.com/nettact/server-lite
+module github.com/nettact/server
 
 go 1.25
 
