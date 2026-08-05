@@ -15,14 +15,12 @@
 #
 #   curl -fsSL https://d.nettact.org/install.sh | bash
 #
-# From a NetTact superproject checkout (the checkout's own compose file and
-# .env.example are copied into the install directory instead of downloaded):
+# From a NetTact checkout — the server repo's deploy/ holds the compose file
+# and .env.example next to this script, so they are copied into the install
+# directory instead of downloaded:
 #
-#   ./server-lite/deploy/install.sh
-#
-# From a standalone server checkout:
-#
-#   ./deploy/install.sh
+#   ./deploy/install.sh          (standalone server checkout)
+#   ./server/deploy/install.sh   (superproject checkout, server submodule)
 #
 # The script is idempotent: an existing .env and the data volume are kept;
 # re-running after a partial failure is safe.
@@ -31,6 +29,7 @@ set -euo pipefail
 # ---------- defaults ----------------------------------------------------------
 PORT=""                 # host port; empty = keep .env / default 12450
 SERVER_VERSION=""       # NETTACT_SERVER_VERSION override
+AUTO_UPDATE=""          # empty = follow .env / default true; true/false = explicit flag
 # Where the deployment lives. Resolved after argument parsing so the error for a
 # missing HOME can name the escape hatch.
 INSTALL_DIR="${NETTACT_INSTALL_DIR:-}"
@@ -48,6 +47,9 @@ Usage: install.sh [options]
                           Accepts an address to publish on, too, e.g.
                           10.0.0.5:12450 to expose it on one interface only
   --server-version <tag>  server image tag  (writes NETTACT_SERVER_VERSION)
+  --auto-update           enable the auto-update sidecar (default on a fresh
+                          install; pinned --server-version turns it off)
+  --no-auto-update        manage updates by hand (docker compose pull && up -d)
   -h, --help              this help
 
 Environment:
@@ -69,6 +71,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --port)            PORT="${2:?--port needs a value}"; shift 2 ;;
     --server-version)  SERVER_VERSION="${2:?}"; shift 2 ;;
+    --auto-update)     AUTO_UPDATE=true; shift ;;
+    --no-auto-update)  AUTO_UPDATE=false; shift ;;
     -h|--help)         usage; exit 0 ;;
     *) die "unknown option: $1 (see --help)" ;;
   esac
@@ -219,8 +223,88 @@ set_env() { # set_env KEY VALUE — replace or append in .env
     printf '%s=%s\n' "$1" "$2" >> .env
   fi
 }
+
+# ---------- effective image tag ------------------------------------------------
+# The tag that will actually run: the flag on THIS command line wins, else the
+# value already in .env (a previous pin), else latest. Resolved before any
+# .env write so the auto-update conflict check below can run against the
+# deployment's REAL tag — not just the flag — and so a rejected invocation does
+# not leave a half-mutated .env behind.
+CURRENT_SERVER_VERSION="$(grep '^NETTACT_SERVER_VERSION=' .env | tail -1 | cut -d= -f2- || true)"
+if [ -n "$SERVER_VERSION" ]; then
+  EFFECTIVE_SERVER_VERSION="$SERVER_VERSION"
+elif [ -n "$CURRENT_SERVER_VERSION" ]; then
+  EFFECTIVE_SERVER_VERSION="$CURRENT_SERVER_VERSION"
+else
+  EFFECTIVE_SERVER_VERSION="latest"
+fi
+
+# The updater would pull `latest` over a pinned tag (or nothing at all for a tag
+# the catalog never published). Explicitly combining the two is a mistake worth
+# stopping on — even when the pin comes from an earlier run's .env rather than
+# this command line. This must run before the writes below.
+if [ "$AUTO_UPDATE" = true ] && [ "$EFFECTIVE_SERVER_VERSION" != latest ]; then
+  die "--auto-update cannot be combined with a pinned --server-version"
+fi
+
 [ -n "$PORT" ]           && set_env NETTACT_HTTP_PORT "$PORT"
 [ -n "$SERVER_VERSION" ] && set_env NETTACT_SERVER_VERSION "$SERVER_VERSION"
+
+# ---------- auto-update resolution ---------------------------------------------
+# The Watchtower sidecar lives in docker-compose.yml behind the `updater` compose
+# profile; the on/off switch is COMPOSE_PROFILES=updater in this .env. Automatic
+# updates are the DEFAULT on a fresh install: the operator opted in by choosing
+# this installer at all. Pinning a version means the operator wants a specific
+# release, so auto-update must not fight it (same rule as the agent installer).
+#
+# Resolution order: explicit --auto-update/--no-auto-update flag, else a pinned
+# --server-version turns it off, else the value already in .env (kept from a
+# previous run), else true for a fresh install. NETTACT_AUTO_UPDATE is written
+# back so the container sees it and the console can say "updates itself" instead
+# of offering a manual download.
+CURRENT_AUTO_UPDATE="$(grep '^NETTACT_AUTO_UPDATE=' .env | tail -1 | cut -d= -f2- || true)"
+if [ -n "$AUTO_UPDATE" ]; then
+  : # explicit flag wins
+elif [ "$EFFECTIVE_SERVER_VERSION" != latest ]; then
+  # Pinned version: no updater. Unless --auto-update was ALSO given, which the
+  # effective-tag check above stops as a contradiction.
+  AUTO_UPDATE=false
+  warn "--server-version pins a specific release, so automatic updates are off (omit --server-version, or run --auto-update, to turn them on)"
+elif [ "$FRESH_ENV" = true ]; then
+  # The .env was just copied from .env.example, whose NETTACT_AUTO_UPDATE=false
+  # is the safe default for manual compose users, not a choice this operator
+  # made. Automatic updates are the installer's default — the operator opted in
+  # by choosing this installer at all.
+  AUTO_UPDATE=true
+elif [ -n "$CURRENT_AUTO_UPDATE" ]; then
+  AUTO_UPDATE="$CURRENT_AUTO_UPDATE"
+else
+  AUTO_UPDATE=true
+fi
+
+set_env NETTACT_AUTO_UPDATE "$AUTO_UPDATE"
+if [ "$AUTO_UPDATE" = true ]; then
+  set_env COMPOSE_PROFILES updater
+  # Randomly bake a minute/hour in the 02:00–05:00 window on first install, so a
+  # fleet doesn't all hit the registry at the same instant. Existing installs
+  # keep their baked cron (idempotent re-run).
+  if [ "$FRESH_ENV" = true ] || ! grep -q '^NETTACT_UPDATE_CRON=' .env; then
+    UPDATE_CRON_H="$((2 + RANDOM % 3))"
+    UPDATE_CRON_M="$((RANDOM % 60))"
+    set_env NETTACT_UPDATE_CRON "0 $UPDATE_CRON_M $UPDATE_CRON_H * * *"
+    log "auto-update: enabled, nightly at 0 $UPDATE_CRON_M $UPDATE_CRON_H * * * (host time; change NETTACT_UPDATE_CRON in .env)"
+  else
+    log "auto-update: enabled, nightly at $(grep '^NETTACT_UPDATE_CRON=' .env | tail -1 | cut -d= -f2-) (change NETTACT_UPDATE_CRON in .env)"
+  fi
+else
+  # Turning the sidecar off means it must also stop if it is already running:
+  # compose leaves a profile's container running until removed.
+  set_env NETTACT_AUTO_UPDATE false
+  if grep -q '^COMPOSE_PROFILES=' .env; then
+    sed -i '/^COMPOSE_PROFILES=/d' .env
+    log "auto-update: disabled (docker compose stop updater will stop a running sidecar)"
+  fi
+fi
 
 # Adopt the host's timezone on FIRST install only, so re-running the installer
 # never overwrites a zone the operator has since edited by hand.
@@ -264,8 +348,13 @@ esac
 BASE_URL="http://$PROBE_HOST:$HTTP_PORT"
 
 # ---------- start server & wait for health --------------------------------------
-log "starting server (docker compose up -d server)…"
-docker compose up -d server
+# With the updater profile active, `up -d` (no service name) also starts the
+# sidecar; a bare `docker compose up -d` later by the operator does the same,
+# because COMPOSE_PROFILES lives in .env next to the compose file. When the
+# profile was just disabled, `--remove-orphans` stops the sidecar that is no
+# longer part of the active config.
+log "starting server (docker compose up -d)…"
+docker compose up -d --remove-orphans
 
 log "waiting for $BASE_URL/api/v1/healthz …"
 HEALTHY=false
@@ -298,6 +387,12 @@ else
 fi
 echo "  Directory: $INSTALL_DIR   (run docker compose from here)"
 echo "  Status:    docker compose ps"
+if [ "$AUTO_UPDATE" = true ]; then
+  UPDATE_CRON_SHOWN="$(grep '^NETTACT_UPDATE_CRON=' .env | tail -1 | cut -d= -f2- || true)"
+  echo "  Updates:   auto (Watchtower sidecar, nightly at ${UPDATE_CRON_SHOWN:-03:00} host time)"
+else
+  echo "  Updates:   manual (docker compose pull && docker compose up -d)"
+fi
 echo "  Docs:      docs/deploy.md · docs/server-config.md · docs/agent-config.md"
 echo
 echo "  No agent is installed — nothing is being monitored yet. On each"

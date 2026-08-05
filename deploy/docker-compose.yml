@@ -1,0 +1,103 @@
+# NetTact server — one-command self-hosting (DEPLOY-001).
+#
+#   1. cp .env.example .env   and review the settings
+#   2. docker compose up -d server         # start the server
+#   3. docker compose logs server          # first run prints the generated admin password (once)
+#   4. open http://localhost:${NETTACT_HTTP_PORT} , log in, mint an enrollment token
+#   5. install an Agent on each machine you want monitored, with that token:
+#      https://d.nettact.org/agent/install.sh
+#
+# This file deploys the SERVER only. Agents are deliberately not part of it:
+# which machines are monitored is a decision per machine, an Agent is installed
+# and updated on its own schedule by its own installer, and the one that used to
+# live here monitored this container rather than anything an operator cared about.
+#
+# See deploy/README.md for status / upgrade / backup / uninstall.
+# Config values come from .env (gitignored). No passwords are baked into the images.
+
+services:
+  server:
+    image: ${NETTACT_SERVER_IMAGE:-ghcr.io/nettact/nettact-server}:${NETTACT_SERVER_VERSION:-latest}
+    container_name: nettact-server
+    restart: unless-stopped
+    # The server is configured entirely by flags. On first run (empty DB) it creates
+    # the admin user and prints a one-time generated password to the log — read it with
+    # `docker compose logs server`, then change it in the console (Settings) or via
+    # `docker compose exec server nettact-server passwd -db /data/nettact.db`.
+    # NOTE: a listen address saved in the console (Settings → Listen address) overrides
+    # -addr and would desync the container from the port mapping below, so the console
+    # hides that control once it detects a container without host networking — change
+    # NETTACT_HTTP_PORT instead. The server detects the network mode from the
+    # interfaces it can see; set NETTACT_NETWORK_MODE=host (or =bridge) under
+    # `environment:` only if it gets that wrong for your runtime.
+    command:
+      - -addr
+      - ":12450"
+      - -db
+      - /data/nettact.db
+      # Session cookie Secure attribute: auto = Secure iff this process serves TLS,
+      # so plain-HTTP deployments keep working. Behind a TLS-terminating reverse
+      # proxy set NETTACT_SECURE_COOKIE=true in .env.
+      - -secure-cookie
+      - ${NETTACT_SECURE_COOKIE:-auto}
+      # For native HTTPS/WSS, mount certs (see the volumes note below), add the four
+      # lines here, AND switch the healthcheck test below to its https variant —
+      # with TLS enabled the listener is TLS-only, so the plain-http check would
+      # never pass and the container would sit permanently unhealthy:
+      # - -tls-cert
+      # - /certs/tls.crt
+      # - -tls-key
+      # - /certs/tls.key
+    environment:
+      # Timezone for the times PEOPLE read — notification bodies ("last seen
+      # 01:42"), the email footer, log lines. Stored and transmitted times are
+      # always UTC and unaffected. The binary embeds the IANA database, so any
+      # zone name works here without installing tzdata; unset means UTC.
+      TZ: ${NETTACT_TZ:-UTC}
+      # Tell the server whether a Watchtower sidecar manages it, so the console's
+      # software-update panel can say "will update itself" instead of "download
+      # it yourself". Set by install.sh; manual compose users get the safe
+      # default (false) unless they opt in.
+      NETTACT_AUTO_UPDATE: ${NETTACT_AUTO_UPDATE:-false}
+      # 6-field cron for the auto-update check, in the host-local timezone (see
+      # NETTACT_TZ). install.sh bakes a random minute/hour in the 02:00–05:00
+      # window on first install so machines don't all hit the registry at once.
+      NETTACT_UPDATE_CRON: ${NETTACT_UPDATE_CRON:-}
+    ports:
+      # Container always listens on 12450; the left side is the host port from .env.
+      - "${NETTACT_HTTP_PORT:-12450}:12450"
+    volumes:
+      - nettact-data:/data          # holds nettact.db + WAL/shm sidecars
+      # - ./certs:/certs:ro         # uncomment to supply TLS cert/key
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:12450/api/v1/healthz"]
+      # With -tls-cert/-tls-key enabled, use this instead (self-signed certs won't
+      # match 127.0.0.1, hence --no-check-certificate for the local probe only):
+      # test: ["CMD", "wget", "-qO-", "--no-check-certificate", "https://127.0.0.1:12450/api/v1/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # Auto-update sidecar: pulls a new image and recreates the server container
+  # nightly at the minute baked into NETTACT_UPDATE_CRON (02:00–05:00 window on a
+  # fresh install). It is a sidecar by design — a container cannot update itself,
+  # so this one holds the Docker socket, which is root-equivalent on this host.
+  # It runs only when the `updater` compose profile is enabled (install.sh sets
+  # COMPOSE_PROFILES=updater in .env by default; set NETTACT_AUTO_UPDATE=false or
+  # re-run install.sh --no-auto-update to manage updates by hand).
+  updater:
+    image: containrrr/watchtower:latest
+    container_name: nettact-server-updater
+    restart: unless-stopped
+    profiles: ["updater"]
+    command: --cleanup --schedule "${NETTACT_UPDATE_CRON:-0 0 3 * * *}" nettact-server
+    environment:
+      # The cron above is interpreted in this timezone, so the update lands in the
+      # host's local early-morning regardless of where the container thinks it is.
+      TZ: ${NETTACT_TZ:-UTC}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  nettact-data:
