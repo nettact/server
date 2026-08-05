@@ -641,6 +641,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		Dev:               cfg.Dev,
 		SecureCookie:      cfg.SecureCookie,
 		Update:            updateSvc,
+		Version:           updateCfg.CurrentVersion,
 		ListenStatus: func(context.Context) *api.ListenStatus {
 			return &api.ListenStatus{
 				EffectiveAddr: effectiveAddr(s.listen.addr, s.ln.Addr()),
