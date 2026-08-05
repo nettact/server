@@ -304,6 +304,17 @@ func startWorkers(w *workers, d deps) {
 			log.Printf("notification delivery tick: %v", err)
 		}
 	})
+
+	// INCIDENT-003: reference freshness expires on the wall clock even without
+	// telemetry (an agent that stopped reporting leaves its gateway/reference
+	// detectors stale), but attribution is otherwise only recomputed when rounds
+	// or traces arrive. A slow tick keeps an open incident's persisted conclusion
+	// honest after its references age out.
+	w.every(60*time.Second, func(ctx context.Context) {
+		if d.fault != nil {
+			d.fault.RecomputeOpenAttributions(ctx)
+		}
+	})
 }
 
 // wireIncidentOps registers the incident snapshot + traceroute orchestration's
