@@ -35,6 +35,7 @@ import (
 	"github.com/nettact/server-core/agentws"
 	"github.com/nettact/server-core/api"
 	"github.com/nettact/server-core/audit"
+	"github.com/nettact/server-core/baseline"
 	"github.com/nettact/server-core/cleanup"
 	"github.com/nettact/server-core/config"
 	"github.com/nettact/server-core/eventbus"
@@ -346,6 +347,9 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	metricsStore.SetRetention(cfg.Retention)
 	settingsSvc := settings.New(db)
 	notifSvc := notification.New(db, cfg.Desktop != nil && cfg.Desktop.NativeDeepLinks)
+	// Historical latency/loss baselines (ALERT-003). Read by ingest before it opens
+	// its write transaction; maintained by an hourly fold worker below.
+	baselineSvc := baseline.New(db)
 
 	// Incident snapshot + traceroute orchestration. Constructed before the fault
 	// engine (which uses it as the synchronous incident-base snapshot writer) and
@@ -388,7 +392,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	// Ingest evaluates the batch's probe rounds inside its own sample transaction
 	// (atomic telemetry + detector state), so it takes the fault engine as its
 	// Evaluator.
-	ing := ingest.New(db, bus, metricsStore, faultSvc)
+	ing := ingest.New(db, bus, metricsStore, faultSvc, baselineSvc)
 	// Reenrollment (AGENT-006) reuses an agent id whose WAL was wiped; the registry
 	// asks ingest to drop its in-memory sequence watermark so the first ack after a
 	// reinstall re-derives from the emptied agent_packets instead of reporting the
@@ -546,6 +550,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 
 	startWorkers(w, deps{
 		metrics:           metricsStore,
+		baseline:          baselineSvc,
 		ingest:            ing,
 		identity:          idSvc,
 		registry:          reg,
@@ -630,6 +635,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		Identity:          idSvc,
 		Registry:          reg,
 		Metrics:           metricsStore,
+		Baseline:          baselineSvc,
 		Cleanup:           cleanupSvc,
 		Config:            cfgSvc,
 		Site:              siteSvc,

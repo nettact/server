@@ -8,6 +8,7 @@ import (
 
 	"github.com/nettact/server-core/agentconnectivity"
 	"github.com/nettact/server-core/agentws"
+	"github.com/nettact/server-core/baseline"
 	"github.com/nettact/server-core/cleanup"
 	"github.com/nettact/server-core/eventbus"
 	"github.com/nettact/server-core/fault"
@@ -123,6 +124,7 @@ func (w *workers) stop(ctx context.Context) bool {
 // deps bundles the services the periodic and event-driven workers need.
 type deps struct {
 	metrics           *metrics.Store
+	baseline          *baseline.Service
 	ingest            *ingest.Service
 	identity          *identity.Service
 	registry          *registry.Service
@@ -157,6 +159,27 @@ func startWorkers(w *workers, d deps) {
 	w.nowThenEvery(5*time.Minute, func(ctx context.Context) {
 		if err := d.metrics.Rollup(ctx); err != nil {
 			log.Printf("rollup: %v", err)
+		}
+	})
+
+	// Baseline fold + prune (ALERT-003), hourly. Hourly rather than per-ingest
+	// because a day-bucket's quantiles have to be recomputed WHOLE each time it
+	// receives a sample (there is no incremental median), so the cadence decides how
+	// many times each bucket is recomputed over its six-hour life. Six is cheap;
+	// once per batch would be thousands.
+	//
+	// Startup-then-every for the same reason as rollup: a desktop tray session that
+	// opens and closes inside the hour would otherwise never fold at all, and a
+	// baseline that never advances silently disables degradation detection. The
+	// per-series watermarks bound the catch-up run, so a startup pass with nothing
+	// due costs one query per series.
+	w.nowThenEvery(time.Hour, func(ctx context.Context) {
+		if err := d.baseline.Fold(ctx); err != nil {
+			log.Printf("baseline fold: %v", err)
+			return
+		}
+		if err := d.baseline.Prune(ctx, baseline.DefaultKeepDays); err != nil {
+			log.Printf("baseline prune: %v", err)
 		}
 	})
 
