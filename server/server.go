@@ -389,6 +389,12 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	// (atomic telemetry + detector state), so it takes the fault engine as its
 	// Evaluator.
 	ing := ingest.New(db, bus, metricsStore, faultSvc)
+	// Reenrollment (AGENT-006) reuses an agent id whose WAL was wiped; the registry
+	// asks ingest to drop its in-memory sequence watermark so the first ack after a
+	// reinstall re-derives from the emptied agent_packets instead of reporting the
+	// old installation's high (which would fast-forward the fresh WAL past
+	// un-uploaded batches).
+	reg.ResetSeqWatermark = ing.ResetSeqWatermark
 	hostLive := hostlive.New()
 	opSvc := opissue.New(db, bus)
 	incidentSvc := incident.New(db)
@@ -499,6 +505,13 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		Bus:         bus,
 		IncidentOps: incidentOps,
 	})
+	// A reenrollment reuses an agent id; fence the old (still-authenticated)
+	// session before the registry clears its sequence state, so it can't ingest
+	// after the reset and re-create a watermark that fast-forwards the fresh WAL
+	// past un-uploaded batches (AGENT-006).
+	reg.DisconnectSession = func(_ context.Context, agentID string) {
+		agentHub.Disconnect(agentID, wire.CloseRevoked, "agent reinstalled")
+	}
 	// The hub is the agent-WebSocket Pusher for incident-snapshot / trace requests;
 	// inject it now that it exists (before serving, so no lock is needed) so the
 	// orchestration's dispatch and reconnect re-push reach live sessions.
@@ -846,7 +859,7 @@ func (s *Server) SetUpdateNoticesDisabled(ctx context.Context, disabled bool) er
 // used by the desktop host to enroll its bundled agent in-process (no token ever
 // reaches a command line).
 func (s *Server) MintEnrollmentToken(ctx context.Context, note string) (string, error) {
-	return s.regSvc.CreateEnrollmentToken(ctx, site.DefaultSiteID, note, 5*time.Minute)
+	return s.regSvc.CreateEnrollmentToken(ctx, site.DefaultSiteID, note, 24*time.Hour)
 }
 
 // EnrollAgent redeems an enrollment request directly against the registry — the
