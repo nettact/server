@@ -161,6 +161,17 @@ type DesktopConfig struct {
 	// newer version and update notices are switched on. The desktop turns it into
 	// one tray balloon per version.
 	OnUpdate func(updatecheck.Status)
+
+	// LocalAgent, when non-nil, exposes the console's management of the external
+	// servers this machine's built-in agent additionally reports to (AGENT-007).
+	// The desktop owns that list — it persists it and restarts the agent when it
+	// changes — so the store lives there and the server only routes to it.
+	//
+	// It has no meaning outside desktop mode: a self-hosted server does not run an
+	// agent, and a standalone agent's servers come from its own configuration
+	// file. Nil therefore makes the routes 404 rather than 501, so a console
+	// talking to a self-hosted server simply finds no such feature.
+	LocalAgent api.LocalAgentAPI
 }
 
 // Server is a running server instance. It owns the listener, HTTP server, agent hub,
@@ -680,6 +691,9 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 			time.AfterFunc(500*time.Millisecond, func() { cfg.Desktop.OnListenAddrChanged(addr) })
 			return nil
 		}
+	}
+	if cfg.Desktop != nil {
+		apiDeps.LocalAgent = cfg.Desktop.LocalAgent
 	}
 	handler := api.Router(apiDeps)
 
