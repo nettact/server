@@ -340,8 +340,8 @@ func startWorkers(w *workers, d deps) {
 	})
 }
 
-// wireIncidentOps registers the incident snapshot + traceroute orchestration's
-// post-commit event subscriptions. The fault engine publishes these off its write
+// wireIncidentOps registers the incident snapshot + traceroute evidence
+// orchestration's post-commit event subscriptions. The fault engine publishes these off its write
 // transaction, so the handlers run synchronously on the publisher's goroutine
 // (the coalesced rule-eval worker for telemetry-driven faults, or the HTTP
 // request goroutine for a configuration-driven termination) — never inside the
@@ -363,8 +363,11 @@ func wireIncidentOps(w *workers, bus *eventbus.Bus, io *incidentops.Service) {
 			log.Printf("incidentops: incident-opened snapshot dispatch (%s): %v", ev.IncidentID, err)
 		}
 	})
-	// Fault confirmed -> single-flight traceroute trigger for the detecting Agent of
-	// an eligible network-availability fault.
+	// Fault confirmed -> claim any traceroute the detecting Agent already ran for
+	// this destination. The Agent triggers on its own failure streak, so its report
+	// often lands before the fault is confirmed here (and always does when the
+	// outage kept it from uploading); this is what attaches the evidence that
+	// arrived first.
 	bus.Subscribe(eventbus.TopicFaultConfirmed, func(m eventbus.Message) {
 		ev, ok := m.Payload.(fault.SignalEvent)
 		if !ok {

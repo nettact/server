@@ -386,7 +386,10 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 
 	// Config force-resolves the faults of removed/changed targets through the fault
 	// engine (FaultTerminator).
-	cfgSvc := config.New(db, reg, bus, faultSvc)
+	// It also carries the path-diagnostic policy down inside DesiredState: the
+	// Agent owns the traceroute trigger now, but the numbers governing it are still
+	// this server's to state.
+	cfgSvc := config.New(db, reg, bus, faultSvc, settingsSvc)
 	// The site's undeletable default monitor group must exist before the console
 	// (or the first-run onboarding wizard) writes targets. Starter-target creation
 	// is owned by the wizard now, so first boot leaves an empty target list.
@@ -402,8 +405,10 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	gameSvc := gamedata.New(db, settingsSvc)
 	// Ingest evaluates the batch's probe rounds inside its own sample transaction
 	// (atomic telemetry + detector state), so it takes the fault engine as its
-	// Evaluator.
-	ing := ingest.New(db, bus, metricsStore, faultSvc, baselineSvc)
+	// Evaluator — and the incident orchestration as its Tracer, because the
+	// traceroute reports an Agent decided to run ride the same packets and have to
+	// commit with the rounds they explain.
+	ing := ingest.New(db, bus, metricsStore, faultSvc, baselineSvc, incidentOps)
 	// Reenrollment (AGENT-006) reuses an agent id whose WAL was wiped; the registry
 	// asks ingest to drop its in-memory sequence watermark so the first ack after a
 	// reinstall re-derives from the emptied agent_packets instead of reporting the
