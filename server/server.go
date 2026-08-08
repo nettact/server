@@ -357,6 +357,14 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	// window's age; it must use the same windows the pruner deletes by.
 	metricsStore.SetRetention(cfg.Retention)
 	settingsSvc := settings.New(db)
+	// The diag_* settings ride to agents inside DesiredState, so a save must
+	// push immediately — a connected agent otherwise keeps the old policy
+	// (including one just switched off) until it happens to reconnect. Wired to
+	// the same TopicConfigChanged the config service publishes, which the hub
+	// answers with a fresh DesiredState per connected agent.
+	settingsSvc.OnDiagPolicyChange(func() {
+		bus.Publish(eventbus.TopicConfigChanged, eventbus.ConfigChanged{SiteID: site.DefaultSiteID})
+	})
 	notifSvc := notification.New(db, cfg.Desktop != nil && cfg.Desktop.NativeDeepLinks)
 	// Historical latency/loss baselines (ALERT-003). Read by ingest before it opens
 	// its write transaction; maintained by an hourly fold worker below.
