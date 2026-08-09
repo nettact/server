@@ -106,24 +106,69 @@ docker compose version >/dev/null 2>&1 || die "Docker Compose v2 ('docker compos
 # ---------- install directory ---------------------------------------------------
 # Candidate sources for the compose assets, captured BEFORE the cd below and in
 # preference order: the current directory first (someone standing in a checkout
-# means that checkout), then the superproject root two levels above this script
-# — server-lite/deploy/install.sh — for the case where the script is invoked by
-# path from elsewhere.
-SRC_DIRS=("$PWD")
+# means that checkout), then this script's own directory, then two levels above
+# it — the superproject root for server/deploy/install.sh — for the case where
+# the script is invoked by path from elsewhere.
+#
+# Every candidate is content-checked, and that check is what makes $PWD safe to
+# consult at all. $PWD is a source because the same file ships both at
+# d.nettact.org and in the repo's deploy/, so running it out of a checkout should
+# use THAT checkout's compose file rather than pairing a local script with a
+# downloaded one. But `curl | bash` runs in whatever directory the operator
+# happened to be standing in, and an unrelated docker-compose.yml there is not
+# this project's: copying it in and `up -d`-ing it would deploy a stranger's
+# stack under NetTact's name. Deploy assets travel as a pair, so requiring
+# .env.example alongside also keeps the two files from coming from different
+# places (local compose + downloaded example, or the reverse).
+#
+# Both halves are matched on STRUCTURE, not on the string "nettact" appearing
+# somewhere: a comment, an image name or a password in someone else's compose
+# file would satisfy a substring search, and what follows this check is
+# `docker compose up -d` on whatever got copied in, with the daemon's
+# privileges. Rejecting too strictly costs nothing — the download below is the
+# canonical file anyway.
+#
+# is_nettact_compose <file> — does this compose file deploy THIS project? The
+# marker is the server's fixed container_name: a NetTact deployment cannot lack
+# it (the installer looks the container up by that name), and an unrelated stack
+# has no reason to claim it. Tolerates YAML quoting and a trailing comment.
+is_nettact_compose() {
+  grep -Eq "^[[:space:]]*container_name:[[:space:]]*['\"]?nettact-server['\"]?([[:space:]].*)?\$" "$1" 2>/dev/null
+}
+# is_nettact_env_example <file> — the compose file interpolates NETTACT_* and
+# nothing else, so an example that assigns none of them cannot be its partner.
+# Commented-out lines don't count: every real one carries live defaults.
+is_nettact_env_example() {
+  [ -f "$1" ] || return 1
+  grep -Eq '^[[:space:]]*NETTACT_[A-Z0-9_]+=' "$1" 2>/dev/null
+}
+SRC_DIRS=()
 add_src() {
   local d
   d="$(cd "$1" 2>/dev/null && pwd)" || return 0
-  case " ${SRC_DIRS[*]} " in *" $d "*) return 0 ;; esac
+  case " ${SRC_DIRS[*]:-} " in *" $d "*) return 0 ;; esac
+  # No compose file at all is the ordinary `curl | bash` case, not a surprise —
+  # say nothing. The two rejections below are worth a word, because something
+  # that looked like a source was deliberately passed over.
+  [ -f "$d/docker-compose.yml" ] || return 0
+  if ! is_nettact_compose "$d/docker-compose.yml"; then
+    warn "ignoring $d/docker-compose.yml — it does not deploy nettact-server, so it is not this project's"
+    return 0
+  fi
+  if ! is_nettact_env_example "$d/.env.example"; then
+    warn "ignoring $d — its docker-compose.yml is this project's but there is no matching .env.example beside it"
+    return 0
+  fi
   SRC_DIRS+=("$d")
 }
+add_src "$PWD"
 # Only when there IS a script path. Piped into bash (curl | bash) BASH_SOURCE is
-# "bash" or unset, dirname of it is ".", and "./../.." would then be two levels
-# above whatever directory the operator happened to be standing in — a stray
-# docker-compose.yml up there is not this project's and must never be deployed.
+# "bash" or unset and dirname of it is ".", so these would silently re-add $PWD
+# and the two levels above it under the guise of the script's own location.
 if [ -f "${BASH_SOURCE[0]:-}" ]; then
   SELF_DIR="$(dirname "${BASH_SOURCE[0]}")"
-  add_src "$SELF_DIR/../.."
   add_src "$SELF_DIR"
+  add_src "$SELF_DIR/../.."
 fi
 
 if [ -z "$INSTALL_DIR" ]; then
@@ -160,13 +205,17 @@ fi
 provide() {
   local name="$1" d
   [ -f "$INSTALL_DIR/$name" ] && return 0
-  for d in "${SRC_DIRS[@]}"; do
-    [ "$d" = "$INSTALL_DIR" ] && continue
-    [ -f "$d/$name" ] || continue
-    cp "$d/$name" "$INSTALL_DIR/$name" || return 1
-    log "copied $name from $d"
-    return 0
-  done
+  # SRC_DIRS can be empty (curl | bash outside a checkout), and bash before 4.4
+  # treats "${arr[@]}" on an empty array as unset under `set -u`.
+  if [ "${#SRC_DIRS[@]}" -gt 0 ]; then
+    for d in "${SRC_DIRS[@]}"; do
+      [ "$d" = "$INSTALL_DIR" ] && continue
+      [ -f "$d/$name" ] || continue
+      cp "$d/$name" "$INSTALL_DIR/$name" || return 1
+      log "copied $name from $d"
+      return 0
+    done
+  fi
   log "downloading $name from $DIST_BASE_URL"
   fetch "$DIST_BASE_URL/$name" "$INSTALL_DIR/$name"
 }
