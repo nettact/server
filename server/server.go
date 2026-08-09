@@ -14,6 +14,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +31,9 @@ import (
 
 	"github.com/nettact/protocol/enroll"
 	"github.com/nettact/protocol/wire"
+
+	"github.com/google/uuid"
+
 	"github.com/nettact/server-core/agentconnectivity"
 	"github.com/nettact/server-core/agentstatus"
 	"github.com/nettact/server-core/agentws"
@@ -57,6 +61,7 @@ import (
 	"github.com/nettact/server-core/sse"
 	"github.com/nettact/server-core/store"
 	"github.com/nettact/server-core/targetstatus"
+	"github.com/nettact/server-core/tsstore"
 	"github.com/nettact/server-core/updatecheck"
 	"github.com/nettact/server/internal/version"
 	"github.com/nettact/server/internal/webui"
@@ -78,6 +83,12 @@ type Config struct {
 	TLSKey  string
 
 	DBPath string // SQLite database path
+
+	// TSDBDir is the time-series data plane's directory (four embedded TSDB
+	// instances + the dataset manifest). Empty selects
+	// filepath.Dir(DBPath) + "/tsdb". It and the SQLite file are one dataset
+	// and must be backed up together.
+	TSDBDir string
 
 	// WebUIDir is the root directory for the runtime-downloaded web console
 	// (versions install to WebUIDir/<version>/). Empty selects
@@ -179,6 +190,7 @@ type DesktopConfig struct {
 type Server struct {
 	cfg     Config
 	db      *store.DB
+	tss     *tsstore.Prom
 	httpSrv *http.Server
 	ln      net.Listener
 	baseURL string
@@ -288,6 +300,32 @@ func isLoopbackOrigin(v string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// ensureDatasetUUID loads (minting on first run) the identity that binds this
+// SQLite file to its tsdb directory. app_settings rather than a new table: it
+// is exactly the "global key/value the server needs at startup" that store
+// exists for, and the settings API's allow-list never exposes it.
+func ensureDatasetUUID(ctx context.Context, db *store.DB) (string, error) {
+	var id string
+	err := db.QueryRowContext(ctx, `SELECT value FROM app_settings WHERE key='dataset_uuid'`).Scan(&id)
+	switch {
+	case err == nil && id != "":
+		return id, nil
+	case err != nil && !errors.Is(err, sql.ErrNoRows):
+		return "", err
+	}
+	id = uuid.NewString()
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO app_settings(key, value) VALUES('dataset_uuid', ?)
+		 ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE app_settings.value=''`, id); err != nil {
+		return "", err
+	}
+	// Re-read: a concurrent first-run writer may have won the conflict.
+	if err := db.QueryRowContext(ctx, `SELECT value FROM app_settings WHERE key='dataset_uuid'`).Scan(&id); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
 // Start brings the server fully up and returns it ready. ctx bounds only the
 // startup work (DB open, migrations, admin bootstrap, listen); the running
 // server derives its own worker context and is stopped only via Shutdown. A
@@ -351,10 +389,34 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	bus := eventbus.New()
 	reg := registry.New(db, cfg.MaxAgents, bus)
 
+	// The time-series data plane. It and the SQLite file are ONE dataset: the
+	// sids in there mean nothing without the dictionary that minted them, so a
+	// UUID stored in app_settings is stamped into the tsdb directory's manifest
+	// and verified on every open — a half-restored backup refuses to start
+	// instead of splicing new series onto dead data. Back the two up together.
+	datasetUUID, err := ensureDatasetUUID(ctx, db)
+	if err != nil {
+		return nil, fmt.Errorf("dataset uuid: %w", err)
+	}
+	tsdbDir := cfg.TSDBDir
+	if tsdbDir == "" {
+		tsdbDir = filepath.Join(filepath.Dir(cfg.DBPath), "tsdb")
+	}
+	tss, err := tsstore.Open(tsdbDir, cfg.Retention.TSStoreConfig(), datasetUUID)
+	if err != nil {
+		return nil, fmt.Errorf("open tsdb: %w", err)
+	}
+	defer func() {
+		if !ok {
+			_ = tss.Close()
+		}
+	}()
+
 	// Leaf services the fault engine and orchestration build on.
-	metricsStore := metrics.New(db)
+	metricsStore := metrics.New(db, tss)
 	// The query side reasons about which rollup tier still holds data for a
-	// window's age; it must use the same windows the pruner deletes by.
+	// window's age; it must use the same windows the data plane drops blocks by
+	// (TSStoreConfig above derives one from the other, same cfg).
 	metricsStore.SetRetention(cfg.Retention)
 	settingsSvc := settings.New(db)
 	// The diag_* settings ride to agents inside DesiredState, so a save must
@@ -368,7 +430,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	notifSvc := notification.New(db, cfg.Desktop != nil && cfg.Desktop.NativeDeepLinks)
 	// Historical latency/loss baselines (ALERT-003). Read by ingest before it opens
 	// its write transaction; maintained by an hourly fold worker below.
-	baselineSvc := baseline.New(db)
+	baselineSvc := baseline.New(db, tss)
 
 	// Incident snapshot + traceroute orchestration. Constructed before the fault
 	// engine (which uses it as the synchronous incident-base snapshot writer) and
@@ -418,11 +480,15 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	// commit with the rounds they explain.
 	ing := ingest.New(db, bus, metricsStore, faultSvc, baselineSvc, incidentOps)
 	// Reenrollment (AGENT-006) reuses an agent id whose WAL was wiped; the registry
-	// asks ingest to drop its in-memory sequence watermark so the first ack after a
-	// reinstall re-derives from the emptied agent_packets instead of reporting the
-	// old installation's high (which would fast-forward the fresh WAL past
-	// un-uploaded batches).
+	// asks ingest to reset its in-memory sequence watermark (and bump its epoch)
+	// so the first ack after a reinstall reflects the zeroed agents.high_sequence
+	// instead of the old installation's high (which would fast-forward the fresh
+	// WAL past un-uploaded batches).
 	reg.ResetSeqWatermark = ing.ResetSeqWatermark
+	// The steady-state liveness bump rides ingest's packet transaction instead of
+	// being its own autocommit write per packet — same seam pattern as above, in
+	// the opposite direction.
+	ing.TouchAgentTx = reg.TouchLastSeenTx
 	hostLive := hostlive.New()
 	opSvc := opissue.New(db, bus)
 	incidentSvc := incident.New(db)
@@ -588,7 +654,6 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		settings:          settingsSvc,
 		bus:               bus,
 		hub:               agentHub,
-		ret:               cfg.Retention,
 	})
 	// Desktop tray summary: incident lifecycle changes kick an immediate refresh.
 	// The tray counts incidents, not signals, so it matches the fault centre.
@@ -637,6 +702,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	s := &Server{
 		cfg:         cfg,
 		db:          db,
+		tss:         tss,
 		agentHub:    agentHub,
 		broker:      broker,
 		workers:     w,
@@ -918,9 +984,11 @@ func (s *Server) DialAgent(ctx context.Context, token string) (wire.Conn, error)
 
 // Shutdown stops the server in the one safe order: close hijacked agent
 // WebSockets first (http.Shutdown neither closes nor waits for them), then the
-// HTTP server, then the background workers, then the SQLite handle strictly last
-// (a live worker writing through a closed DB would be a use-after-close). It is
-// idempotent; ctx bounds each stage.
+// HTTP server, then the background workers, then the storage handles strictly
+// last (a live worker writing through a closed store would be a
+// use-after-close). The tsdb instances close before SQLite: their Close only
+// flushes their own WAL, while ingest — already drained by CloseAll — was the
+// only writer that touched both. It is idempotent; ctx bounds each stage.
 func (s *Server) Shutdown(ctx context.Context) error {
 	var err error
 	s.shutdownOnce.Do(func() {
@@ -934,14 +1002,18 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			err = e
 		}
 		if s.workers.stop(ctx) {
+			if e := s.tss.Close(); e != nil && err == nil {
+				err = e
+			}
 			if e := s.db.Close(); e != nil && err == nil {
 				err = e
 			}
 		} else if err == nil {
 			// The shutdown deadline fired before every worker returned; a worker may
-			// still be mid-write, so closing the DB now would be a use-after-close.
-			// Leave the handle open (the process exits shortly after) and report it.
-			err = errors.New("server: workers did not stop within the shutdown deadline; DB left open to avoid use-after-close")
+			// still be mid-write, so closing either store now would be a
+			// use-after-close. Leave the handles open (the process exits shortly
+			// after) and report it.
+			err = errors.New("server: workers did not stop within the shutdown deadline; storage left open to avoid use-after-close")
 		}
 	})
 	return err

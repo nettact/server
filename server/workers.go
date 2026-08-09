@@ -138,16 +138,16 @@ type deps struct {
 	settings          *settings.Service
 	bus               *eventbus.Bus
 	hub               *agentws.Hub
-	ret               metrics.RetentionConfig
 }
 
 func startWorkers(w *workers, d deps) {
-	// Downsampling: raw → 1m/1h/1d rollups. Five minutes, not one: every run
-	// rewrites each active series' tail page in every tier (SQLite page-level
-	// write amplification), so the cadence is a direct multiplier on steady-state
-	// disk writes. Freshness does not ride on it — charts up to 2h read the raw
-	// tier (pickTier), so the rollups only serve windows long enough that a
-	// ≤5-minute right edge is invisible.
+	// Downsampling: raw → 1m/1h/1d buckets in the data plane. Five minutes, not
+	// one: a run rewrites nothing when nothing changed (the unchanged-guard is
+	// exact), but it still SCANS every active series' tail, and the bucket
+	// appends it does make are one write per active series per run — the
+	// cadence is a direct multiplier on that. Freshness does not ride on it —
+	// charts up to 2h read the raw tier (pickTier), so the rollups only serve
+	// windows long enough that a ≤5-minute right edge is invisible.
 	//
 	// Startup-then-every for the same reason the retention workers use it: at the
 	// old one-minute cadence a missed first tick cost a minute, but five minutes
@@ -183,18 +183,13 @@ func startWorkers(w *workers, d deps) {
 		}
 	})
 
-	// Tiered retention + dedup-row prune + expired-session prune, hourly. Session
-	// pruning matters for the desktop: one session row is created per launch and
-	// per tray activation, and ValidateSession only reaps rows it happens to see.
+	// Expired-session prune, hourly. Session pruning matters for the desktop:
+	// one session row is created per launch and per tray activation, and
+	// ValidateSession only reaps rows it happens to see. (Time-series retention
+	// stopped being a job: the data plane drops whole blocks by its per-tier
+	// windows on its own, and packet dedup is a single high-water column on the
+	// agents row, not a row per packet.)
 	w.every(time.Hour, func(ctx context.Context) {
-		if err := d.metrics.Retention(ctx, d.ret); err != nil {
-			log.Printf("retention: %v", err)
-		}
-		// The agent WAL keeps at most 72h of unacked data, so week-old dedup rows
-		// can never legitimately replay.
-		if err := d.ingest.PrunePackets(ctx, 7*24*time.Hour); err != nil {
-			log.Printf("prune packets: %v", err)
-		}
 		if _, err := d.identity.PruneSessions(ctx); err != nil {
 			log.Printf("prune sessions: %v", err)
 		}

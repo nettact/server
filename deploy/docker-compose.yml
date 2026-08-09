@@ -67,7 +67,7 @@ services:
       # Container always listens on 12450; the left side is the host port from .env.
       - "${NETTACT_HTTP_PORT:-12450}:12450"
     volumes:
-      - nettact-data:/data          # holds nettact.db + WAL/shm sidecars
+      - nettact-data:/data          # holds nettact.db (+WAL/shm) AND tsdb/ — one dataset, back up together
       # - ./certs:/certs:ro         # uncomment to supply TLS cert/key
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:12450/api/v1/healthz"]

@@ -2,7 +2,7 @@
 
 English | [简体中文](./README-zh.md)
 
-NetTact Server is an all-in-one network monitoring server for homes, small offices, and self-hosted deployments. It combines NetTact Server Core, the HTTP API, Agent connectivity, fault detection, notifications, and the web console in a lightweight service backed by a single SQLite database by default.
+NetTact Server is an all-in-one network monitoring server for homes, small offices, and self-hosted deployments. It combines NetTact Server Core, the HTTP API, Agent connectivity, fault detection, notifications, and the web console in a lightweight service backed by local storage — a single SQLite database for configuration and state plus an embedded time-series store for metric history.
 
 Agents run on monitored devices, execute probes from each device's location, and actively push telemetry. The server centrally distributes monitoring targets, stores history, detects faults, and presents the results. The Server does not scan the network itself and never needs to initiate a connection to an Agent.
 
@@ -18,7 +18,7 @@ The server uses a single-admin, single-site model and supports up to 50 Agents. 
 
 ## Key Advantages
 
-- **Simple to operate**: one server application, one SQLite database, and one web console, with no external database required.
+- **Simple to operate**: one server application, one data directory (SQLite + embedded time-series store), and one web console, with no external database required.
 - **Endpoint perspective**: Agents execute probes where users and devices actually connect.
 - **Outbound-only Agents**: no Agent ports are exposed, which works well with NAT, firewalls, dynamic IPs, and remote networks.
 - **Data ownership**: configuration, metrics, events, and alerts stay in your own storage.
