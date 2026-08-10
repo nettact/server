@@ -60,6 +60,7 @@ import (
 	"github.com/nettact/server-core/settings"
 	"github.com/nettact/server-core/site"
 	"github.com/nettact/server-core/sse"
+	"github.com/nettact/server-core/statuspage"
 	"github.com/nettact/server-core/store"
 	"github.com/nettact/server-core/targetstatus"
 	"github.com/nettact/server-core/tsstore"
@@ -544,6 +545,10 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 
 	// Agent status list (AGENT-001): per-agent health + resource rollup (read-time).
 	agentStatusSvc := agentstatus.New(db, metricsStore, settingsSvc)
+	// Public status pages: anonymous, admin-curated views over the two
+	// aggregations above. It republishes their output rather than deriving
+	// anything, so it is built after both and owns only the page tables.
+	statusPageSvc := statuspage.New(db, tgtStatusSvc, agentStatusSvc)
 	// Agent liveness detector (AGENT-002): offline/recovery state machine, driven
 	// by a worker tick fed the live connected-session set. It records through the
 	// fault engine like every other detector.
@@ -785,6 +790,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		OpIssue:           opSvc,
 		TargetStatus:      tgtStatusSvc,
 		AgentStatus:       agentStatusSvc,
+		StatusPage:        statusPageSvc,
 		AgentConnectivity: agentConnEng,
 		SSE:               broker,
 		AgentWS:           agentHub,

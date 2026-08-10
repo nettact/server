@@ -14,6 +14,12 @@ func testDist() fstest.MapFS {
 		"index.html":             {Data: []byte("<html>SHELL</html>")},
 		"assets/index-abc123.js": {Data: []byte("console.log(1)")},
 		"favicon.ico":            {Data: []byte("ico")},
+		// The public status app: a second SPA inside the same dist, with its own
+		// shell, its own hashed assets, and a hand-editable runtime config.
+		"status/index.html":         {Data: []byte("<html>STATUS</html>")},
+		"status/config.js":          {Data: []byte("window.NETTACT_STATUS_CONFIG={apiBase:''}")},
+		"status/assets/app-xyz.js":  {Data: []byte("console.log(2)")},
+		"status/assets/app-xyz.css": {Data: []byte("body{}")},
 	}
 }
 
@@ -142,9 +148,82 @@ func TestSPAIndexMissingIsRetryable(t *testing.T) {
 
 func TestSPAHashedAssetsAreImmutable(t *testing.T) {
 	h := spaHandler(testDist())
-	resp := get(t, h, "/assets/index-abc123.js")
+	for _, p := range []string{"/assets/index-abc123.js", "/status/assets/app-xyz.js"} {
+		resp := get(t, h, p)
+		if cc := resp.Header.Get("Cache-Control"); cc != "public, max-age=31536000, immutable" {
+			t.Errorf("%s Cache-Control = %q; want the immutable directive", p, cc)
+		}
+		resp.Body.Close()
+	}
+}
+
+// The public status app is a second SPA in the same dist. Two things make it
+// different from the console: it must be reached with a trailing slash (its
+// assets are relative, so /status would resolve them against the site root), and
+// its shell is a different file.
+func TestStatusAppIsServedUnderItsOwnPrefix(t *testing.T) {
+	h := spaHandler(testDist())
+
+	resp := get(t, h, "/status")
 	defer resp.Body.Close()
-	if cc := resp.Header.Get("Cache-Control"); cc != "public, max-age=31536000, immutable" {
-		t.Fatalf("Cache-Control = %q; want the immutable directive", cc)
+	if resp.StatusCode != http.StatusMovedPermanently {
+		t.Fatalf("/status status = %d; want a 301 onto the trailing slash", resp.StatusCode)
+	}
+	if loc := resp.Header.Get("Location"); loc != "/status/" {
+		t.Fatalf("/status Location = %q; want /status/", loc)
+	}
+
+	tests := []struct {
+		name       string
+		path       string
+		wantStatus int
+		wantBody   string
+	}{
+		{"status shell", "/status/", http.StatusOK, "<html>STATUS</html>"},
+		{"status shell explicit", "/status/index.html", http.StatusOK, "<html>STATUS</html>"},
+		{"runtime config", "/status/config.js", http.StatusOK, "window.NETTACT_STATUS_CONFIG={apiBase:''}"},
+		{"status asset", "/status/assets/app-xyz.js", http.StatusOK, "console.log(2)"},
+		// Same rule as the console's assets: a missing build artefact is a 404, not
+		// an HTML shell the browser would reject on its MIME type.
+		{"missing status asset", "/status/assets/app-gone.js", http.StatusNotFound, ""},
+		// The console shell still owns the root.
+		{"console root untouched", "/", http.StatusOK, "<html>SHELL</html>"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := get(t, h, tc.path)
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.wantStatus {
+				t.Fatalf("status = %d; want %d", resp.StatusCode, tc.wantStatus)
+			}
+			if tc.wantBody == "" {
+				return
+			}
+			b, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(b) != tc.wantBody {
+				t.Fatalf("body = %q; want %q", b, tc.wantBody)
+			}
+		})
+	}
+}
+
+// A dist built before the status app existed (or caught mid-rebuild) has no
+// status shell. That must be the same retryable 503 the console shell gives,
+// never the console's HTML served under the status app's URL.
+func TestStatusShellMissingIsRetryable(t *testing.T) {
+	dist := testDist()
+	delete(dist, "status/index.html")
+	h := spaHandler(dist)
+
+	resp := get(t, h, "/status/")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d; want 503", resp.StatusCode)
+	}
+	if ra := resp.Header.Get("Retry-After"); ra == "" {
+		t.Fatal("missing Retry-After")
 	}
 }
