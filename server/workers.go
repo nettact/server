@@ -267,11 +267,11 @@ func startWorkers(w *workers, d deps) {
 		}
 	})
 
-	// Incident snapshot/trace maintenance on a short managed interval: finalize
-	// snapshots past their deadline, time out expired traces, close orphaned
-	// cohorts and rehydrate the eligible queued trace work. Idempotent and cheap
-	// when idle. Runs on the workers context/waitgroup, so shutdown waits for an
-	// in-flight tick and it never writes through a closed DB.
+	// Incident evidence maintenance on a short managed interval: reconcile trace
+	// references against alert state, the safety net for the post-commit
+	// deactivation. Idempotent and cheap when idle. Runs on the workers
+	// context/waitgroup, so shutdown waits for an in-flight tick and it never
+	// writes through a closed DB.
 	w.every(5*time.Second, func(ctx context.Context) {
 		if err := d.incidentops.Tick(ctx); err != nil {
 			log.Printf("incidentops tick: %v", err)
@@ -335,7 +335,7 @@ func startWorkers(w *workers, d deps) {
 	})
 }
 
-// wireIncidentOps registers the incident snapshot + traceroute evidence
+// wireIncidentOps registers the incident evidence
 // orchestration's post-commit event subscriptions. The fault engine publishes these off its write
 // transaction, so the handlers run synchronously on the publisher's goroutine
 // (the coalesced rule-eval worker for telemetry-driven faults, or the HTTP
@@ -347,29 +347,19 @@ func wireIncidentOps(w *workers, bus *eventbus.Bus, io *incidentops.Service) {
 	if bus == nil || io == nil {
 		return
 	}
-	// Incident opened -> one collecting snapshot entry + IncidentSnapshotRequest
-	// dispatched to each distinct involved Agent.
-	bus.Subscribe(eventbus.TopicIncidentOpened, func(m eventbus.Message) {
-		ev, ok := m.Payload.(eventbus.IncidentEvent)
-		if !ok {
-			return
-		}
-		if err := io.OnIncidentOpened(w.ctx, ev); err != nil {
-			log.Printf("incidentops: incident-opened snapshot dispatch (%s): %v", ev.IncidentID, err)
-		}
-	})
-	// Fault confirmed -> claim any traceroute the detecting Agent already ran for
-	// this destination. The Agent triggers on its own failure streak, so its report
-	// often lands before the fault is confirmed here (and always does when the
-	// outage kept it from uploading); this is what attaches the evidence that
-	// arrived first.
+	// Fault confirmed -> claim the evidence the detecting Agent already collected
+	// for it: the traceroute it ran on its own failure streak, and the incident
+	// scene it collected on the same edge (or on losing this server entirely).
+	// The Agent triggers on its own, so its reports often land before the fault is
+	// confirmed here — and always do when the outage is what kept them queued.
+	// This is what attaches whichever arrived first.
 	bus.Subscribe(eventbus.TopicFaultConfirmed, func(m eventbus.Message) {
 		ev, ok := m.Payload.(fault.SignalEvent)
 		if !ok {
 			return
 		}
 		if err := io.OnSignalConfirmed(w.ctx, ev); err != nil {
-			log.Printf("incidentops: fault-confirmed trace trigger (%s): %v", ev.SignalID, err)
+			log.Printf("incidentops: fault-confirmed evidence claim (%s): %v", ev.SignalID, err)
 		}
 	})
 	// Fault resolved -> deactivate the trace references it held and close any cohort

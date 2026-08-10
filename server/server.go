@@ -479,10 +479,10 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	// its write transaction; maintained by an hourly fold worker below.
 	baselineSvc := baseline.New(db, tss)
 
-	// Incident snapshot + traceroute orchestration. Constructed before the fault
-	// engine (which uses it as the synchronous incident-base snapshot writer) and
-	// before the hub (whose Pusher it becomes); its Pusher is injected once the hub
-	// exists, below, closing the construction cycle without an import cycle.
+	// Incident evidence orchestration: the server-side incident base, plus the
+	// ingest and claiming of the traceroutes and scenes the agents collect on
+	// their own. Constructed before the fault engine, which uses it as the
+	// synchronous incident-base writer inside its own transaction.
 	incidentOps := incidentops.New(db, metricsStore, settingsSvc, bus)
 
 	// Fault engine: runs the built-in detectors round by round, maintains fault
@@ -638,13 +638,12 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	})
 
 	agentHub := agentws.New(agentws.Deps{
-		Registry:    reg,
-		Ingest:      ing,
-		Config:      cfgSvc,
-		HostLive:    hostLive,
-		OpIssue:     opSvc,
-		Bus:         bus,
-		IncidentOps: incidentOps,
+		Registry: reg,
+		Ingest:   ing,
+		Config:   cfgSvc,
+		HostLive: hostLive,
+		OpIssue:  opSvc,
+		Bus:      bus,
 	})
 	// A reenrollment reuses an agent id; fence the old (still-authenticated)
 	// session before the registry clears its sequence state, so it can't ingest
@@ -653,10 +652,6 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	reg.DisconnectSession = func(_ context.Context, agentID string) {
 		agentHub.Disconnect(agentID, wire.CloseRevoked, "agent reinstalled")
 	}
-	// The hub is the agent-WebSocket Pusher for incident-snapshot / trace requests;
-	// inject it now that it exists (before serving, so no lock is needed) so the
-	// orchestration's dispatch and reconnect re-push reach live sessions.
-	incidentOps.SetPusher(agentHub)
 
 	w := newWorkers()
 	// Post-commit orchestration subscriptions (incident opened / evidence added /
@@ -665,9 +660,10 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	// transaction, so the handlers never run inside it.
 	wireIncidentOps(w, bus, incidentOps)
 
-	// Recovery before listening: finalize snapshots/traces whose deadline elapsed
-	// while the server was down, close cohorts orphaned by refs/alerts that are no
-	// longer active, and rehydrate the still-eligible queued trace work.
+	// Recovery before listening: reconcile trace references left active by an
+	// alert that resolved while the server was down. The agent-collected evidence
+	// itself needs no recovery — it is triggered and delivered by the agent, so
+	// anything produced during the downtime arrives in the next packet.
 	if err := incidentOps.Recover(ctx); err != nil {
 		log.Printf("incidentops recover: %v", err)
 	}
