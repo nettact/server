@@ -80,13 +80,19 @@ func TestRolledBackDatabaseRefusesToStart(t *testing.T) {
 	}
 	cancel()
 
-	// The rollback: an older database whose newest series predates that mark.
+	// The rollback. Deleting the row is NOT enough — AUTOINCREMENT keeps the
+	// counter, which is exactly what makes an ordinary deletion safe. A genuine
+	// older snapshot carries an sqlite_sequence that never reached 90, so wind
+	// the counter back too; that is the only state that can re-issue id 90.
 	db, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatalf("reopen db: %v", err)
 	}
 	if _, err := db.ExecContext(ctx, `DELETE FROM series WHERE id=90`); err != nil {
 		t.Fatalf("roll back series: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE sqlite_sequence SET seq=10 WHERE name='series'`); err != nil {
+		t.Fatalf("roll back sequence: %v", err)
 	}
 	db.Close()
 
@@ -102,6 +108,55 @@ func TestRolledBackDatabaseRefusesToStart(t *testing.T) {
 	if !strings.Contains(err.Error(), "older backup") {
 		t.Fatalf("Start error = %v, want the rolled-back-database explanation", err)
 	}
+}
+
+// TestDeletingTheNewestSeriesStillStarts is the false positive the guard must
+// not have. Removing an agent (or orphan cleanup) deletes the highest series
+// row while AUTOINCREMENT keeps the counter, so MAX(series.id) drops below the
+// data plane's high-water mark on a perfectly healthy installation. Gating on
+// MAX(id) would refuse the next ordinary restart; gating on sqlite_sequence,
+// which still proves no id can be re-issued, does not.
+func TestDeletingTheNewestSeriesStillStarts(t *testing.T) {
+	dir := storetest.Dir(t)
+	dbPath := filepath.Join(dir, "deleted-newest.db")
+
+	srv := startDesktopTestServer(t, dbPath, time.Minute)
+	ctx := context.Background()
+	if _, err := srv.db.ExecContext(ctx, `
+		INSERT INTO series(id, agent_id, site_id, monitor_id, kind, target, config_serial)
+		VALUES(90,'agent_a','site_default','mon_a','icmp.rtt_ms','1.1.1.1',1)`); err != nil {
+		t.Fatalf("seed series: %v", err)
+	}
+	if _, err := srv.tss.AppendRaw(ctx, []tsstore.RawSample{{SID: 90, TS: time.Now().Unix() - 60, Value: 1}}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	cancel()
+
+	// The ordinary deletion: the row goes, the counter stays.
+	db, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM series WHERE id=90`); err != nil {
+		t.Fatalf("delete newest series: %v", err)
+	}
+	db.Close()
+
+	restarted, err := Start(ctx, Config{
+		Addr: "127.0.0.1:0", DBPath: dbPath,
+		AdminUser: "admin", AdminPass: "test-password", MaxAgents: 5,
+		Desktop: &DesktopConfig{LoginTokenTTL: time.Minute},
+	})
+	if err != nil {
+		t.Fatalf("Start refused a healthy installation after the newest series was deleted: %v", err)
+	}
+	stopCtx, stopCancel := context.WithTimeout(ctx, 5*time.Second)
+	_ = restarted.Shutdown(stopCtx)
+	stopCancel()
 }
 
 // TestFreshInstallStartsWithoutATSDBDirectory is the other side of the guard:

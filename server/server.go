@@ -434,18 +434,28 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	// installation), but the rolled-back sqlite_sequence hands the next new
 	// monitor a series id the data plane still holds samples for — the new
 	// monitor would silently inherit a dead one's history. The data plane's
-	// high-water mark is the evidence, and a dictionary below it cannot be the
-	// one that minted those ids.
+	// high-water mark is the evidence, and a dictionary that will re-issue ids
+	// below it cannot be the one that minted them.
+	//
+	// The evidence is sqlite_sequence, NOT MAX(series.id). Deleting the newest
+	// series is ordinary business (an agent is removed, orphan cleanup runs)
+	// and drops MAX(id) below the high-water mark while AUTOINCREMENT
+	// deliberately keeps the counter — comparing against MAX(id) would refuse
+	// the very next restart after a routine deletion. Only a counter that has
+	// gone backwards proves a rollback. A missing row means the table never
+	// allocated (fresh dictionary), which the series-count guard above covers.
 	if hw := tss.SeriesHighWater(); hw > 0 {
-		var maxID int64
-		if err := db.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM series`).Scan(&maxID); err != nil {
+		var nextID int64
+		err := db.QueryRowContext(ctx,
+			`SELECT COALESCE(seq,0) FROM sqlite_sequence WHERE name='series'`).Scan(&nextID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("check dataset generation: %w", err)
 		}
-		if maxID < hw {
-			return nil, fmt.Errorf("this database's newest series is %d but %s already holds data up to series %d: "+
+		if nextID < hw {
+			return nil, fmt.Errorf("this database will next issue series ids from %d but %s already holds data up to series %d: "+
 				"the database was restored from an older backup than the tsdb directory beside it, and reusing those "+
 				"series ids would attach the old history to new monitors — restore the matching pair, or delete both to start fresh",
-				maxID, tsdbDir, hw)
+				nextID+1, tsdbDir, hw)
 		}
 	}
 
