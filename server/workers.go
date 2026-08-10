@@ -193,7 +193,14 @@ func startWorkers(w *workers, d deps) {
 		if _, err := d.identity.PruneSessions(ctx); err != nil {
 			log.Printf("prune sessions: %v", err)
 		}
-		// Evidence retention: drop agent-collected snapshot detail and shared trace
+		// Recover any scene claim whose one post-commit chance was missed. Hourly
+		// rather than on the fast incident tick: it rescans the scenes still short
+		// of a reference across the whole claim window, and a scene that waited an
+		// hour to be filed is evidence arriving late, not evidence lost.
+		if err := d.incidentops.ReconcileSceneClaims(ctx); err != nil {
+			log.Printf("incidentops reconcile scene claims: %v", err)
+		}
+		// Evidence retention: drop agent-collected scene detail and shared trace
 		// hop detail for incidents resolved past the retention window, marking them
 		// evidence_expired while preserving the incident/alert/evidence summaries.
 		if err := d.incidentops.Retention(ctx); err != nil {
