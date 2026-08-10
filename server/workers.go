@@ -194,12 +194,12 @@ func startWorkers(w *workers, d deps) {
 			log.Printf("prune sessions: %v", err)
 		}
 		// Recover any scene claim whose one post-commit chance was missed. Hourly
-		// rather than on the fast incident tick: it rescans every scene still short
-		// of a reference, and a scene that waited an hour to be filed is evidence
-		// arriving late, not evidence lost. Reconciling before Retention is the
-		// intuitive order but not a correctness requirement — the scene retention
-		// grace is wider than this interval precisely so the two calls do not have
-		// to be sequenced.
+		// rather than on the fast incident tick: it rescans the scenes still short
+		// of a reference across the whole retention horizon, and a scene that waited
+		// an hour to be filed is evidence arriving late, not evidence lost.
+		// Reconciling before Retention is the intuitive order but not a correctness
+		// requirement — the scene retention grace is wider than this interval
+		// precisely so the two calls do not have to be sequenced.
 		if err := d.incidentops.ReconcileSceneClaims(ctx); err != nil {
 			log.Printf("incidentops reconcile scene claims: %v", err)
 		}
