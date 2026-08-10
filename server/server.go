@@ -23,6 +23,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -392,8 +393,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	// The time-series data plane. It and the SQLite file are ONE dataset: the
 	// sids in there mean nothing without the dictionary that minted them, so a
 	// UUID stored in app_settings is stamped into the tsdb directory's manifest
-	// and verified on every open — a half-restored backup refuses to start
-	// instead of splicing new series onto dead data. Back the two up together.
+	// and verified on every open. Back the two up together.
 	datasetUUID, err := ensureDatasetUUID(ctx, db)
 	if err != nil {
 		return nil, fmt.Errorf("dataset uuid: %w", err)
@@ -401,6 +401,24 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	tsdbDir := cfg.TSDBDir
 	if tsdbDir == "" {
 		tsdbDir = filepath.Join(filepath.Dir(cfg.DBPath), "tsdb")
+	}
+	// Half-restore guard. The manifest's UUID catches a FOREIGN data plane, but
+	// not the likelier accident: restoring this installation's SQLite file
+	// without its tsdb folder. Both halves would carry the same UUID, and an
+	// absent tsdb directory is indistinguishable from a first run — Open would
+	// claim it and the server would come up serving a dictionary whose history
+	// silently vanished. A dictionary with series in it and no manifest beside
+	// it can only mean the two halves were separated, so refuse.
+	if _, statErr := os.Stat(filepath.Join(tsdbDir, tsstore.ManifestName)); errors.Is(statErr, fs.ErrNotExist) {
+		var seriesCount int64
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM series`).Scan(&seriesCount); err != nil {
+			return nil, fmt.Errorf("check dataset halves: %w", err)
+		}
+		if seriesCount > 0 {
+			return nil, fmt.Errorf("this database describes %d time series but %s holds no data plane: "+
+				"the SQLite file and its tsdb directory are one dataset and must be restored together "+
+				"(restore the matching tsdb backup, or delete the database to start fresh)", seriesCount, tsdbDir)
+		}
 	}
 	tss, err := tsstore.Open(tsdbDir, cfg.Retention.TSStoreConfig(), datasetUUID)
 	if err != nil {
@@ -411,6 +429,25 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 			_ = tss.Close()
 		}
 	}()
+	// The other half-restore, and the more insidious one: an OLDER database
+	// restored beside the CURRENT data plane. The dataset UUID matches (same
+	// installation), but the rolled-back sqlite_sequence hands the next new
+	// monitor a series id the data plane still holds samples for — the new
+	// monitor would silently inherit a dead one's history. The data plane's
+	// high-water mark is the evidence, and a dictionary below it cannot be the
+	// one that minted those ids.
+	if hw := tss.SeriesHighWater(); hw > 0 {
+		var maxID int64
+		if err := db.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM series`).Scan(&maxID); err != nil {
+			return nil, fmt.Errorf("check dataset generation: %w", err)
+		}
+		if maxID < hw {
+			return nil, fmt.Errorf("this database's newest series is %d but %s already holds data up to series %d: "+
+				"the database was restored from an older backup than the tsdb directory beside it, and reusing those "+
+				"series ids would attach the old history to new monitors — restore the matching pair, or delete both to start fresh",
+				maxID, tsdbDir, hw)
+		}
+	}
 
 	// Leaf services the fault engine and orchestration build on.
 	metricsStore := metrics.New(db, tss)
