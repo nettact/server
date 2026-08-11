@@ -547,8 +547,11 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	agentStatusSvc := agentstatus.New(db, metricsStore, settingsSvc)
 	// Public status pages: anonymous, admin-curated views over the two
 	// aggregations above. It republishes their output rather than deriving
-	// anything, so it is built after both and owns only the page tables.
-	statusPageSvc := statuspage.New(db, tgtStatusSvc, agentStatusSvc)
+	// anything, so it is built after both and owns only the page tables. The
+	// metrics store is its third source, for the published reliability windows and
+	// the daily uptime bar — the same aggregation the console's availability
+	// endpoints read, so the two can never disagree about a ratio.
+	statusPageSvc := statuspage.New(db, tgtStatusSvc, agentStatusSvc, metricsStore)
 	// Agent liveness detector (AGENT-002): offline/recovery state machine, driven
 	// by a worker tick fed the live connected-session set. It records through the
 	// fault engine like every other detector.
