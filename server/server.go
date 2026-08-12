@@ -71,14 +71,21 @@ import (
 
 // Config drives one Start. Zero values select the documented defaults.
 type Config struct {
-	// Addr is the fallback listen address — an explicit -addr flag or the built-in
-	// default — passed to net.Listen("tcp", ...) unless a listen_addr setting
-	// saved in the web console overrides it (DB > flag > default).
+	// Addr is the process-provided listen address. An explicit -addr value is
+	// authoritative; otherwise an environment-owned value wins over a
+	// listen_addr setting saved in the web console and the built-in default
+	// (flag > environment > DB > default).
 	Addr string
 
 	// AddrFromFlag marks Addr as coming from an explicit -addr flag (vs the
-	// built-in default). Used only for source reporting in server-info.
+	// built-in default). It makes Addr authoritative and reports that ownership
+	// through server-info so the console can lock its listen controls.
 	AddrFromFlag bool
+
+	// AddrFromEnv marks Addr as coming from NETTACT_SERVER_ADDR. The command owns
+	// environment parsing; keeping that boundary here lets embedded hosts such as
+	// Desktop remain unaffected by a standalone-server deployment variable.
+	AddrFromEnv bool
 
 	// TLSCert/TLSKey enable HTTPS/WSS natively. Both or neither (validated).
 	TLSCert string
@@ -221,30 +228,32 @@ type Server struct {
 // The desktop host matches it with errors.Is to show a port-specific dialog.
 var ErrListen = errors.New("server: listen failed")
 
-// listenResolution is the outcome of the DB > flag > default listen-address
+// listenResolution is the outcome of the flag > environment > DB > default listen-address
 // resolution, reported through server-info.
 type listenResolution struct {
 	addr         string
-	source       string // "default" | "flag" | "db"
+	source       string // "default" | "flag" | "db" | "env"
 	fallbackFrom string // configured addr that failed to bind (source reverted to flag/default)
 }
 
-// resolveListenAddr applies the listen-address priority: a valid listen_addr
-// setting saved in the console wins over cfg.Addr (explicit flag or built-in
-// default). A malformed stored value is logged and ignored rather than
-// preventing startup.
+// resolveListenAddr applies the listen-address priority. An explicit flag wins
+// outright, followed by an environment-owned address; otherwise a valid
+// listen_addr setting saved in the console wins over the built-in default. A
+// malformed stored value is logged and ignored rather than preventing startup.
 func resolveListenAddr(ctx context.Context, set *settings.Service, cfg Config) listenResolution {
-	flagOrDefault := "default"
 	if cfg.AddrFromFlag {
-		flagOrDefault = "flag"
+		return listenResolution{addr: cfg.Addr, source: "flag"}
+	}
+	if cfg.AddrFromEnv {
+		return listenResolution{addr: cfg.Addr, source: "env"}
 	}
 	v, err := set.Get(ctx, settings.KeyListenAddr)
 	if err != nil || v == "" {
-		return listenResolution{addr: cfg.Addr, source: flagOrDefault}
+		return listenResolution{addr: cfg.Addr, source: "default"}
 	}
 	if _, _, splitErr := net.SplitHostPort(v); splitErr != nil {
 		log.Printf("ignoring malformed listen_addr setting %q: %v", v, splitErr)
-		return listenResolution{addr: cfg.Addr, source: flagOrDefault}
+		return listenResolution{addr: cfg.Addr, source: "default"}
 	}
 	return listenResolution{addr: v, source: "db"}
 }
@@ -744,7 +753,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	}
 	updateSvc := updatecheck.New(updateCfg)
 
-	// Resolve the listen address (DB > flag > default) before building the router
+	// Resolve the listen address (flag > environment > DB > default) before building the router
 	// so its status closure can report the outcome; the actual bind happens below.
 	listenRes := resolveListenAddr(ctx, settingsSvc, cfg)
 

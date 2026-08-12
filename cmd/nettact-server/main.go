@@ -44,6 +44,24 @@ import (
 // fixed here instead of being exposed as a flag.
 const maxAgents = 50
 
+const envServerAddr = "NETTACT_SERVER_ADDR"
+
+// resolveListenAddrSource preserves an explicit command-line choice before
+// consulting the environment. An empty variable is treated as unset so service
+// managers can leave a placeholder in their environment without disabling the
+// console control.
+func resolveListenAddrSource(flagAddr string, flagExplicit bool) (addr string, fromFlag, fromEnv bool) {
+	if flagExplicit {
+		return flagAddr, true, false
+	}
+	if envAddr, ok := os.LookupEnv(envServerAddr); ok {
+		if envAddr = strings.TrimSpace(envAddr); envAddr != "" {
+			return envAddr, false, true
+		}
+	}
+	return flagAddr, flagExplicit, false
+}
+
 func main() {
 	// Subcommand dispatch before flag parsing: `passwd` runs its own FlagSet and
 	// exits without touching the server flag surface.
@@ -52,7 +70,7 @@ func main() {
 		return
 	}
 
-	addr := flag.String("addr", ":12450", "listen address (a listen address saved in the web console overrides this flag)")
+	addr := flag.String("addr", ":12450", "listen address (an explicit value overrides NETTACT_SERVER_ADDR and the web console)")
 	dbPath := flag.String("db", "./nettact.db", "SQLite database path")
 	webuiDir := flag.String("webui-dir", "", "web console download/install directory (default: <db dir>/webui)")
 	dev := flag.Bool("dev", false, "dev mode: open CORS for the Vite origin, non-Secure cookie")
@@ -80,6 +98,7 @@ func main() {
 			addrFromFlag = true
 		}
 	})
+	resolvedAddr, addrFromFlag, addrFromEnv := resolveListenAddrSource(*addr, addrFromFlag)
 
 	// TLS is all-or-nothing: with only one flag set (a missing or mistyped mounted
 	// secret), silently falling back to plaintext would expose bearer tokens and
@@ -106,8 +125,9 @@ func main() {
 	}
 
 	srv, err := server.Start(context.Background(), server.Config{
-		Addr:         *addr,
+		Addr:         resolvedAddr,
 		AddrFromFlag: addrFromFlag,
+		AddrFromEnv:  addrFromEnv,
 		TLSCert:      *tlsCert,
 		TLSKey:       *tlsKey,
 		DBPath:       *dbPath,

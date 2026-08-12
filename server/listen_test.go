@@ -73,6 +73,66 @@ func TestListenAddrResolvedFromDB(t *testing.T) {
 	}
 }
 
+func TestListenAddrEnvironmentOverridesDB(t *testing.T) {
+	dbPath := filepath.Join(storetest.Dir(t), "listen-env.db")
+	seedListenAddr(t, dbPath, freePort(t))
+	want := freePort(t)
+
+	srv, err := Start(context.Background(), Config{
+		Addr:        want,
+		AddrFromEnv: true,
+		DBPath:      dbPath,
+		AdminUser:   "admin",
+		AdminPass:   "test-password",
+		MaxAgents:   5,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	})
+
+	if got := srv.ln.Addr().String(); got != want {
+		t.Fatalf("bound addr = %q; want environment address %q", got, want)
+	}
+	if srv.listen.source != "env" || srv.listen.fallbackFrom != "" {
+		t.Fatalf("resolution = %+v; want source=env", srv.listen)
+	}
+}
+
+func TestListenAddrExplicitFlagOverridesDB(t *testing.T) {
+	dbPath := filepath.Join(storetest.Dir(t), "listen-flag.db")
+	seedListenAddr(t, dbPath, freePort(t))
+	want := freePort(t)
+
+	srv, err := Start(context.Background(), Config{
+		Addr:         want,
+		AddrFromFlag: true,
+		DBPath:       dbPath,
+		AdminUser:    "admin",
+		AdminPass:    "test-password",
+		MaxAgents:    5,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	})
+
+	if got := srv.ln.Addr().String(); got != want {
+		t.Fatalf("bound addr = %q; want explicit flag address %q", got, want)
+	}
+	if srv.listen.source != "flag" || srv.listen.fallbackFrom != "" {
+		t.Fatalf("resolution = %+v; want source=flag", srv.listen)
+	}
+}
+
 func TestListenAddrFallbackWhenDBAddrUnbindable(t *testing.T) {
 	dbPath := filepath.Join(storetest.Dir(t), "listen-fallback.db")
 	// Occupy a port and seed it as the configured address.
