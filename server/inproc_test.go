@@ -19,7 +19,8 @@ import (
 
 // TestInProcessEnrollAndDial proves the desktop in-memory path end to end at the
 // server boundary: mint a token, EnrollAgent directly (no HTTP), then
-// DialAgent (no WebSocket) and run the full Hello→DesiredState→Packet→Ack flow.
+// DialAgent (no WebSocket) and run the full schema-8
+// Hello→DesiredState→SequenceFloor→Applied→Packet→Ack flow.
 func TestInProcessEnrollAndDial(t *testing.T) {
 	dbPath := filepath.Join(storetest.Dir(t), "inproc.db")
 	srv := startDesktopTestServer(t, dbPath, time.Minute)
@@ -75,6 +76,10 @@ func TestInProcessEnrollAndDial(t *testing.T) {
 		Hostname:      "desktop-host",
 		Platform:      "windows",
 		AgentVersion:  "test",
+		Capabilities:  []string{wire.CapSequenceFloorV1},
+		// The generation the enrollment response stamped, persisted with the
+		// credential exactly as the agent does.
+		EnrollmentEpoch: resp.EnrollmentEpoch,
 		Permissions: permission.PermissionReport{
 			Supported: []string{string(permission.ProbeTCP)},
 			Granted:   []string{string(permission.ProbeTCP)},
@@ -94,6 +99,21 @@ func TestInProcessEnrollAndDial(t *testing.T) {
 	}
 	if f.DesiredState == nil {
 		t.Fatalf("first push = %+v, want DesiredState", f)
+	}
+
+	// The schema-8 floor barrier: push, echo, then the drain is open.
+	f, err = c.ReadFrame(rctx)
+	if err != nil || f.SequenceFloor == nil {
+		t.Fatalf("second push = %+v err=%v, want SequenceFloor", f, err)
+	}
+	if f.SequenceFloor.EnrollmentEpoch != resp.EnrollmentEpoch {
+		t.Fatalf("floor epoch = %d, want %d", f.SequenceFloor.EnrollmentEpoch, resp.EnrollmentEpoch)
+	}
+	if err := c.WriteFrame(ctx, wire.Frame{SequenceFloorApplied: &wire.SequenceFloorApplied{
+		EnrollmentEpoch: f.SequenceFloor.EnrollmentEpoch,
+		SequenceFloor:   f.SequenceFloor.SequenceFloor,
+	}}); err != nil {
+		t.Fatalf("write floor applied: %v", err)
 	}
 
 	// Send a telemetry packet and expect an ack over the pipe.
