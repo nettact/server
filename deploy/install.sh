@@ -47,7 +47,7 @@ Usage: install.sh [options]
                           Accepts an address to publish on, too, e.g.
                           10.0.0.5:12450 to expose it on one interface only
   --server-version <tag>  server image tag  (writes NETTACT_SERVER_VERSION)
-  --auto-update           enable the auto-update sidecar (default on a fresh
+  --auto-update           enable the host systemd update timer (default on a fresh
                           install; pinned --server-version turns it off)
   --no-auto-update        manage updates by hand (docker compose pull && up -d)
   -h, --help              this help
@@ -79,7 +79,9 @@ while [ $# -gt 0 ]; do
 done
 
 # ---------- preflight ----------------------------------------------------------
-command -v docker >/dev/null 2>&1 || die "docker not found — install Docker Engine 24+ first (https://docs.docker.com/engine/install/)"
+DOCKER_BIN="$(command -v docker 2>/dev/null || true)"
+[ -n "$DOCKER_BIN" ] || die "docker not found — install Docker Engine 24+ first (https://docs.docker.com/engine/install/)"
+case "$DOCKER_BIN" in /*) ;; *) die "cannot resolve docker to an absolute executable path: $DOCKER_BIN" ;; esac
 docker info >/dev/null 2>&1      || die "cannot talk to the Docker daemon (is it running? do you need sudo / the docker group?)"
 
 ENGINE_VER="$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo 0)"
@@ -102,6 +104,16 @@ probe() {
 }
 
 docker compose version >/dev/null 2>&1 || die "Docker Compose v2 ('docker compose') not available — the legacy v1 'docker-compose' is not supported"
+
+as_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
+  else
+    die "installing the systemd update timer needs root; install sudo or run this installer as root with NETTACT_INSTALL_DIR set"
+  fi
+}
 
 # ---------- install directory ---------------------------------------------------
 # Candidate sources for the compose assets, captured BEFORE the cd below and in
@@ -176,7 +188,7 @@ if [ -z "$INSTALL_DIR" ]; then
   INSTALL_DIR="$HOME/nettact"
 fi
 mkdir -p "$INSTALL_DIR" || die "cannot create the install directory $INSTALL_DIR"
-INSTALL_DIR="$(cd "$INSTALL_DIR" && pwd)"
+INSTALL_DIR="$(cd "$INSTALL_DIR" && pwd -P)"
 
 # An install done from some other directory is not just "somewhere else": compose
 # derives the project name from the directory, so that deployment's containers
@@ -288,7 +300,7 @@ else
   EFFECTIVE_SERVER_VERSION="latest"
 fi
 
-# The updater would pull `latest` over a pinned tag (or nothing at all for a tag
+# The update timer would pull `latest` over a pinned tag (or nothing at all for a tag
 # the catalog never published). Explicitly combining the two is a mistake worth
 # stopping on — even when the pin comes from an earlier run's .env rather than
 # this command line. This must run before the writes below.
@@ -300,11 +312,10 @@ fi
 [ -n "$SERVER_VERSION" ] && set_env NETTACT_SERVER_VERSION "$SERVER_VERSION"
 
 # ---------- auto-update resolution ---------------------------------------------
-# The Watchtower sidecar lives in docker-compose.yml behind the `updater` compose
-# profile; the on/off switch is COMPOSE_PROFILES=updater in this .env. Automatic
-# updates are the DEFAULT on a fresh install: the operator opted in by choosing
-# this installer at all. Pinning a version means the operator wants a specific
-# release, so auto-update must not fight it (same rule as the agent installer).
+# A host systemd timer performs Docker updates. Automatic updates are the DEFAULT
+# on a fresh install: the operator opted in by choosing this installer at all.
+# Pinning a version means the operator wants a specific release, so auto-update
+# must not fight it (same rule as the agent installer).
 #
 # Resolution order: explicit --auto-update/--no-auto-update flag, else a pinned
 # --server-version turns it off, else the value already in .env (kept from a
@@ -332,8 +343,13 @@ else
 fi
 
 set_env NETTACT_AUTO_UPDATE "$AUTO_UPDATE"
+# No current compose service uses profiles. Remove the switch left by the old
+# Watchtower deployment on every run, including an auto-update-to-auto-update
+# migration, so a stale profile cannot change future compose behavior.
+if grep -q '^COMPOSE_PROFILES=' .env; then
+  sed -i '/^COMPOSE_PROFILES=/d' .env
+fi
 if [ "$AUTO_UPDATE" = true ]; then
-  set_env COMPOSE_PROFILES updater
   # Randomly bake a minute/hour in the 02:00–05:00 window on first install, so a
   # fleet doesn't all hit the registry at the same instant. Existing installs
   # keep their baked cron (idempotent re-run).
@@ -346,13 +362,8 @@ if [ "$AUTO_UPDATE" = true ]; then
     log "auto-update: enabled, nightly at $(grep '^NETTACT_UPDATE_CRON=' .env | tail -1 | cut -d= -f2-) (change NETTACT_UPDATE_CRON in .env)"
   fi
 else
-  # Turning the sidecar off means it must also stop if it is already running:
-  # compose leaves a profile's container running until removed.
   set_env NETTACT_AUTO_UPDATE false
-  if grep -q '^COMPOSE_PROFILES=' .env; then
-    sed -i '/^COMPOSE_PROFILES=/d' .env
-    log "auto-update: disabled (docker compose stop updater will stop a running sidecar)"
-  fi
+  log "auto-update: disabled"
 fi
 
 # Adopt the host's timezone on FIRST install only, so re-running the installer
@@ -365,6 +376,25 @@ if [ "$FRESH_ENV" = true ]; then
   else
     warn "could not detect the host timezone — notification times will be UTC (set NETTACT_TZ in .env)"
   fi
+fi
+
+# Validate and normalize the persisted schedule before stopping an existing
+# timer or changing the running server. A typo in .env must not turn a healthy
+# auto-updating install into a half-migrated one with no timer.
+if [ "$AUTO_UPDATE" = true ]; then
+  UPDATE_CRON="$(grep '^NETTACT_UPDATE_CRON=' .env | tail -1 | cut -d= -f2- || true)"
+  read -r CRON_SECOND UPDATE_MINUTE UPDATE_HOUR CRON_DAY CRON_MONTH CRON_WEEKDAY CRON_EXTRA <<< "$UPDATE_CRON"
+  if [ -n "${CRON_EXTRA:-}" ] || [ "$CRON_SECOND" != 0 ] || [ "$CRON_DAY" != '*' ] || \
+     [ "$CRON_MONTH" != '*' ] || [ "$CRON_WEEKDAY" != '*' ]; then
+    die "NETTACT_UPDATE_CRON=$UPDATE_CRON must have the form '0 <minute> <hour> * * *'"
+  fi
+  case "$UPDATE_MINUTE:$UPDATE_HOUR" in
+    *[!0-9:]*|:*|*:) die "NETTACT_UPDATE_CRON=$UPDATE_CRON must use a fixed numeric minute and hour" ;;
+  esac
+  [ "$((10#$UPDATE_MINUTE))" -le 59 ] || die "NETTACT_UPDATE_CRON minute must be between 0 and 59"
+  [ "$((10#$UPDATE_HOUR))" -le 23 ] || die "NETTACT_UPDATE_CRON hour must be between 0 and 23"
+  printf -v UPDATE_MINUTE '%02d' "$((10#$UPDATE_MINUTE))"
+  printf -v UPDATE_HOUR '%02d' "$((10#$UPDATE_HOUR))"
 fi
 
 # NETTACT_HTTP_PORT is interpolated into the HOST side of the compose port
@@ -396,12 +426,27 @@ case "$BIND_ADDR" in
 esac
 BASE_URL="http://$PROBE_HOST:$HTTP_PORT"
 
+# ---------- stop previous updater before changing the server -------------------
+UPDATE_SERVICE=/etc/systemd/system/nettact-server-update.service
+UPDATE_TIMER=/etc/systemd/system/nettact-server-update.timer
+UPDATE_SCRIPT=/usr/local/lib/nettact-server/update.sh
+HAD_UPDATE_UNITS=false
+if [ -e "$UPDATE_SERVICE" ] || [ -e "$UPDATE_TIMER" ] || [ -e "$UPDATE_SCRIPT" ]; then
+  HAD_UPDATE_UNITS=true
+fi
+if [ "$AUTO_UPDATE" = true ] || [ "$HAD_UPDATE_UNITS" = true ]; then
+  command -v systemctl >/dev/null 2>&1 || die "systemd is required to install or remove the automatic Docker update timer"
+  as_root systemctl disable --now nettact-server-update.timer >/dev/null 2>&1 || true
+  as_root systemctl stop nettact-server-update.service >/dev/null 2>&1 || true
+  as_root rm -f "$UPDATE_SERVICE" "$UPDATE_TIMER" "$UPDATE_SCRIPT"
+  as_root rmdir /usr/local/lib/nettact-server >/dev/null 2>&1 || true
+  as_root systemctl daemon-reload
+fi
+# A previous release used a Watchtower container. Stop it before compose changes
+# the server so it cannot recreate the container during this installation.
+docker rm -f nettact-server-updater >/dev/null 2>&1 || true
+
 # ---------- start server & wait for health --------------------------------------
-# With the updater profile active, `up -d` (no service name) also starts the
-# sidecar; a bare `docker compose up -d` later by the operator does the same,
-# because COMPOSE_PROFILES lives in .env next to the compose file. When the
-# profile was just disabled, `--remove-orphans` stops the sidecar that is no
-# longer part of the active config.
 log "starting server (docker compose up -d)…"
 docker compose up -d --remove-orphans
 
@@ -413,6 +458,67 @@ for _ in $(seq 1 60); do
 done
 $HEALTHY || { docker compose logs --tail 40 server >&2 || true; die "server did not become healthy in 120s (logs above; check the port and 'docker compose ps')"; }
 log "server is healthy"
+
+# ---------- host auto-update timer ----------------------------------------------
+if [ "$AUTO_UPDATE" = true ]; then
+  INSTALL_USER="$(id -un)"
+  INSTALL_HOME="${HOME:-}"
+  if [ -z "$INSTALL_HOME" ] && command -v getent >/dev/null 2>&1; then
+    INSTALL_HOME="$(getent passwd "$(id -u)" | cut -d: -f6 || true)"
+  fi
+  [ -n "$INSTALL_HOME" ] && [ -d "$INSTALL_HOME" ] || die "cannot resolve the installing user's home directory for Docker credentials"
+  INSTALL_HOME="$(cd "$INSTALL_HOME" && pwd -P)"
+  printf -v INSTALL_DIR_Q '%q' "$INSTALL_DIR"
+  printf -v DOCKER_BIN_Q '%q' "$DOCKER_BIN"
+  SYSTEMD_HOME="$(printf '%s' "$INSTALL_HOME" | sed 's/\\/\\\\/g; s/"/\\"/g; s/%/%%/g')"
+
+  unit_dir="$(mktemp -d)"
+  trap 'rm -rf "$unit_dir"' EXIT
+  cat > "$unit_dir/update.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+INSTALL_DIR=$INSTALL_DIR_Q
+DOCKER_BIN=$DOCKER_BIN_Q
+old_image="\$("\$DOCKER_BIN" inspect --format '{{.Image}}' nettact-server 2>/dev/null || true)"
+"\$DOCKER_BIN" compose --project-directory "\$INSTALL_DIR" --env-file "\$INSTALL_DIR/.env" -f "\$INSTALL_DIR/docker-compose.yml" pull server
+"\$DOCKER_BIN" compose --project-directory "\$INSTALL_DIR" --env-file "\$INSTALL_DIR/.env" -f "\$INSTALL_DIR/docker-compose.yml" up -d --no-deps server
+new_image="\$("\$DOCKER_BIN" inspect --format '{{.Image}}' nettact-server)"
+if [ -n "\$old_image" ] && [ "\$old_image" != "\$new_image" ]; then
+  "\$DOCKER_BIN" image rm "\$old_image" >/dev/null 2>&1 || true
+fi
+EOF
+  cat > "$unit_dir/nettact-server-update.service" <<EOF
+[Unit]
+Description=Update the NetTact Server container
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=$INSTALL_USER
+Environment="HOME=$SYSTEMD_HOME"
+ExecStart=$UPDATE_SCRIPT
+EOF
+  cat > "$unit_dir/nettact-server-update.timer" <<EOF
+[Unit]
+Description=Check nightly for NetTact Server container updates
+
+[Timer]
+OnCalendar=*-*-* ${UPDATE_HOUR}:${UPDATE_MINUTE}:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  as_root install -d -m 0755 /usr/local/lib/nettact-server
+  as_root install -m 0755 "$unit_dir/update.sh" "$UPDATE_SCRIPT"
+  as_root install -m 0644 "$unit_dir/nettact-server-update.service" "$UPDATE_SERVICE"
+  as_root install -m 0644 "$unit_dir/nettact-server-update.timer" "$UPDATE_TIMER"
+  as_root systemctl daemon-reload
+  as_root systemctl enable --now nettact-server-update.timer
+  trap - EXIT
+  rm -rf "$unit_dir"
+fi
 
 # ---------- admin credentials ----------------------------------------------------
 # AUTH-001: on first run the server prints a one-time generated password.
@@ -438,7 +544,7 @@ echo "  Directory: $INSTALL_DIR   (run docker compose from here)"
 echo "  Status:    docker compose ps"
 if [ "$AUTO_UPDATE" = true ]; then
   UPDATE_CRON_SHOWN="$(grep '^NETTACT_UPDATE_CRON=' .env | tail -1 | cut -d= -f2- || true)"
-  echo "  Updates:   auto (Watchtower sidecar, nightly at ${UPDATE_CRON_SHOWN:-03:00} host time)"
+  echo "  Updates:   auto (systemd timer, nightly at ${UPDATE_CRON_SHOWN:-03:00} host time)"
 else
   echo "  Updates:   manual (docker compose pull && docker compose up -d)"
 fi
