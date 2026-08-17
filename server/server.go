@@ -540,8 +540,8 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	// asks ingest to reset its in-memory sequence watermark (and bump its epoch)
 	// so the first ack after a reinstall reflects the zeroed agents.high_sequence
 	// instead of the old installation's high (which would fast-forward the fresh
-	// WAL past un-uploaded batches). The schema-8 epoch rotation (CLOUD-013C)
-	// rides the same seam — RotateEpoch zeroes the column inside its transaction
+	// WAL past un-uploaded batches). The schema-8 epoch rotation rides the
+	// same seam — RotateEpoch zeroes the column inside its transaction
 	// and resets the cache through this function.
 	reg.ResetSeqWatermark = ing.ResetSeqWatermark
 	// The steady-state liveness bump rides ingest's packet transaction instead of
