@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/nettact/server-core/notifypolicy"
 	"github.com/nettact/server-core/registry"
 	"github.com/nettact/server-core/settings"
+	"github.com/nettact/server-core/store"
 )
 
 // workers owns every background goroutine on one context so shutdown is a single
@@ -138,6 +140,7 @@ type deps struct {
 	settings          *settings.Service
 	bus               *eventbus.Bus
 	hub               *agentws.Hub
+	db                *store.DB
 }
 
 func startWorkers(w *workers, d deps) {
@@ -297,6 +300,51 @@ func startWorkers(w *workers, d deps) {
 		if err := d.cleanup.Tick(ctx); err != nil {
 			log.Printf("cleanup tick: %v", err)
 		}
+	})
+
+	// WAL watchdog: wal_autocheckpoint keeps the SQLite log at ~32 MiB, so the
+	// file being far past that means checkpointing has stopped working — in
+	// production that was one leaked read connection pinning the WAL read mark,
+	// discovered only when the log hit 5 GB and the disk neared full. Detection
+	// is a plain file stat; only once the size is suspicious does the watchdog
+	// spend a passive checkpoint (the same kind autocheckpoint runs) to name
+	// the lag precisely, plus the read-pool counters — the closest database/sql
+	// gets to saying WHO is sitting on a connection. Log-only by design: a
+	// stronger checkpoint could not advance past a pinned reader either, so
+	// there is nothing safe to do automatically.
+	const walWarnBytes = 128 << 20
+	w.every(5*time.Minute, func(ctx context.Context) {
+		size, err := d.db.WALSize()
+		if err != nil {
+			log.Printf("wal watchdog: stat: %v", err)
+			return
+		}
+		if size < walWarnBytes {
+			return
+		}
+		frames, backfilled, err := d.db.Checkpoint(ctx)
+		if errors.Is(err, store.ErrCheckpointBusy) {
+			// Another checkpoint held the lock, so nothing was measured. Say so
+			// rather than reporting a drain: the counts are sentinels here.
+			log.Printf("wal watchdog: wal is %d MiB but another checkpoint holds the lock; retrying next tick", size>>20)
+			return
+		}
+		if err != nil {
+			log.Printf("wal watchdog: wal is %d MiB and checkpoint failed: %v", size>>20, err)
+			return
+		}
+		rs := d.db.ReadStats()
+		// Frames left behind is the diagnosis, not a flag from the PRAGMA: a
+		// passive checkpoint reports success even when a reader stops it short
+		// (see store.DB.Checkpoint), so a stalled back-fill is only visible as
+		// backfilled falling below frames.
+		if stalled := frames - backfilled; stalled > 0 {
+			log.Printf("wal watchdog: wal is %d MiB (warn at %d) and the checkpoint left %d of %d frames behind; read pool %d in use / %d idle — a connection is pinned in a read transaction and the log cannot be reclaimed past its snapshot",
+				size>>20, int64(walWarnBytes)>>20, stalled, frames, rs.InUse, rs.Idle)
+			return
+		}
+		log.Printf("wal watchdog: wal is %d MiB (warn at %d) but the checkpoint drained all %d frames; the file should shrink at the next reset",
+			size>>20, int64(walWarnBytes)>>20, frames)
 	})
 
 	// Offline sweeper: a live WebSocket keeps an agent out of the sweep, so this

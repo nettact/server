@@ -716,6 +716,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		settings:          settingsSvc,
 		bus:               bus,
 		hub:               agentHub,
+		db:                db,
 	})
 	// Desktop tray summary: incident lifecycle changes kick an immediate refresh.
 	// The tray counts incidents, not signals, so it matches the fault centre.
@@ -885,6 +886,14 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	s.httpSrv = &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		// Reap idle keep-alive connections: without this they live until the
+		// client goes away, and a production goroutine dump showed connReader
+		// goroutines idled for days. Idle-only on purpose — ReadTimeout/
+		// WriteTimeout would also clock active responses, killing SSE streams
+		// (`/api/v1/events` stays open for the console's lifetime); an idle
+		// deadline only fires between requests, which SSE and hijacked
+		// WebSocket connections never are.
+		IdleTimeout: 2 * time.Minute,
 	}
 
 	// In desktop mode seed the deep-link origin so notifications have somewhere to
