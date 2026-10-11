@@ -68,6 +68,23 @@ jobs:
             [ -n "${!v}" ] || { echo "::error::$v is not configured"; exit 1; }
           done
 
+      # Fail in seconds, with a clear cause, rather than after downloading and
+      # validating the table: list (read) and write+delete a probe object under
+      # the prefix with the configured token.
+      - name: Check R2 access
+        run: |
+          set -euo pipefail
+          probe="$PREFIX/.ci-write-probe-$GITHUB_RUN_ID"
+          if ! err=$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "$PREFIX/" --max-items 1 2>&1 >/dev/null); then
+            echo "::error::cannot list s3://$BUCKET/$PREFIX/ with R2_ACCESS_KEY_ID — check that the R2 API token exists and can read bucket $BUCKET: $err"
+            exit 1
+          fi
+          if ! err=$(printf 'probe' | aws s3 cp - "s3://$BUCKET/$probe" --only-show-errors 2>&1); then
+            echo "::error::cannot write s3://$BUCKET/$PREFIX/ with R2_ACCESS_KEY_ID — the R2 API token needs Object Read & Write on bucket $BUCKET: $err"
+            exit 1
+          fi
+          aws s3 rm "s3://$BUCKET/$probe" --only-show-errors
+
       - name: Resolve snapshot version
         id: ver
         run: |
@@ -76,7 +93,15 @@ jobs:
           tag="asn-$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          if aws s3api head-object --bucket "$BUCKET" --key "$PREFIX/$tag/asn-db.json" >/dev/null 2>&1; then
+          # r2_get KEY FILE: 0 = fetched, 1 = no such key; any other failure
+          # (credentials, network) aborts instead of reading as "absent".
+          r2_get() {
+            local err
+            if err=$(aws s3 cp "s3://$BUCKET/$1" "$2" --only-show-errors 2>&1); then return 0; fi
+            if grep -qE '\(404\)|NoSuchKey|Not Found' <<<"$err"; then return 1; fi
+            echo "::error::reading s3://$BUCKET/$1 failed: $err"; exit 1
+          }
+          if r2_get "$PREFIX/$tag/asn-db.json" existing.json; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "$tag already published; nothing to do"
           else
@@ -137,7 +162,15 @@ jobs:
           set -euo pipefail
           new=$(jq -r .sha256 dist-asn/asn-db.json)
           old=""
-          if aws s3 cp "s3://$BUCKET/$PREFIX/asn-db.json" current.json --only-show-errors 2>/dev/null; then
+          # r2_get KEY FILE: 0 = fetched, 1 = no such key; any other failure
+          # (credentials, network) aborts instead of reading as "absent".
+          r2_get() {
+            local err
+            if err=$(aws s3 cp "s3://$BUCKET/$1" "$2" --only-show-errors 2>&1); then return 0; fi
+            if grep -qE '\(404\)|NoSuchKey|Not Found' <<<"$err"; then return 1; fi
+            echo "::error::reading s3://$BUCKET/$1 failed: $err"; exit 1
+          }
+          if r2_get "$PREFIX/asn-db.json" current.json; then
             old=$(jq -r .sha256 current.json)
           fi
           if [ "$new" = "$old" ]; then
@@ -172,7 +205,15 @@ jobs:
         run: |
           set -euo pipefail
           current=""
-          if aws s3 cp "s3://$BUCKET/$PREFIX/asn-db.json" current.json --only-show-errors 2>/dev/null; then
+          # r2_get KEY FILE: 0 = fetched, 1 = no such key; any other failure
+          # (credentials, network) aborts instead of reading as "absent".
+          r2_get() {
+            local err
+            if err=$(aws s3 cp "s3://$BUCKET/$1" "$2" --only-show-errors 2>&1); then return 0; fi
+            if grep -qE '\(404\)|NoSuchKey|Not Found' <<<"$err"; then return 1; fi
+            echo "::error::reading s3://$BUCKET/$1 failed: $err"; exit 1
+          }
+          if r2_get "$PREFIX/asn-db.json" current.json; then
             current=$(jq -r .tag current.json)
           fi
           aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "$PREFIX/" --delimiter / \
