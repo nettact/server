@@ -191,3 +191,26 @@ func TestLoadWithNothingInstalled(t *testing.T) {
 		t.Fatalf("Load = %v, %v; want (nil, nil)", tbl, err)
 	}
 }
+
+// TestUpdateSkipsAnIdenticalTable: a newer snapshot whose table is
+// byte-identical to the installed one is not downloaded again.
+func TestUpdateSkipsAnIdenticalTable(t *testing.T) {
+	in, center := newTestInstaller(t)
+	data := syntheticTable(t, fillerRanges, 15169)
+	center.publish(t, manifestFor("20261005", data, fillerRanges+2), data)
+	if _, err := in.Update(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	center.requests = nil
+	center.publish(t, manifestFor("20261012", data, fillerRanges+2), data)
+	tbl, err := in.Update(context.Background(), "20261005")
+	if err != nil || tbl != nil {
+		t.Fatalf("Update = %v, %v; want no-op for an identical table", tbl, err)
+	}
+	for _, p := range center.requests {
+		if strings.HasSuffix(p, DataAsset) {
+			t.Fatalf("identical table downloaded again: %v", center.requests)
+		}
+	}
+}

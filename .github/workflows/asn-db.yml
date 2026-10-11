@@ -2,23 +2,31 @@
 #
 # Weekly (and on demand), take a snapshot of iptoasn.com's ip2asn-v4 table,
 # validate it with ci/asndb — the same parser and sanity floor a server applies
-# when it installs the table — and publish it as a GitHub Release tagged
-# asn-YYYYMMDD with three assets: ip2asn-v4.tsv.gz, asn-db.json (the manifest)
-# and SHA256SUMS. Servers install it through the download center
-# (<base>/asn-db.json for the newest snapshot, <base>/<tag>/<asset> for files);
-# see internal/asndb.
+# when it installs the table — and upload it to the download center's R2
+# bucket under asn/ as asn/asn-YYYYMMDD/{ip2asn-v4.tsv.gz,asn-db.json,SHA256SUMS},
+# then point asn/asn-db.json at it. Servers install it through the download
+# center (<base>/asn-db.json for the newest snapshot, <base>/<tag>/<asset> for
+# files); see internal/asndb.
 #
-# These releases live beside the server's own vX.Y.Z releases, so two rules
-# keep them out of its way:
-#   - they are created with --latest=false, so "the latest release of this
-#     repository" keeps meaning the newest server release;
-#   - only the newest KEEP snapshots are retained (release and tag deleted), so
-#     weekly snapshots never crowd server releases out of release listings.
-#     A server always downloads the snapshot its freshly fetched manifest names,
-#     so pruning older snapshots breaks nothing.
+# Snapshots are data, not server releases, so they live in object storage
+# rather than GitHub Releases: no release notifications, no entries in the
+# server's release list, and this job needs no write access to the repository.
 #
-# Required secret: CI_SUBMODULE_SSH_KEY — read access to nettact/protocol and
-# nettact/server-core (the validator imports server-core's asnlookup).
+# Ordering keeps every reader consistent:
+#   - a snapshot whose table is byte-identical to the published one is not
+#     uploaded at all, so servers never download the same table twice;
+#   - a snapshot directory is written once and never overwritten (the download
+#     center caches it as immutable), so an existing directory skips the run;
+#   - the snapshot's files go up before the root manifest names them, and
+#     pruning never removes the snapshot the root manifest names.
+#
+# Uses the repository's existing download-center R2 settings:
+#   secrets   CI_SUBMODULE_SSH_KEY  read access to nettact/protocol and
+#                                   nettact/server-core (the validator imports
+#                                   server-core's asnlookup)
+#             R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
+#   variables R2_ACCOUNT_ID, R2_BUCKET
+# This job touches only keys under asn/.
 
 name: ASN table
 
@@ -37,38 +45,51 @@ permissions:
 env:
   UPSTREAM: https://iptoasn.com/data/ip2asn-v4.tsv.gz
   KEEP: '3'
+  BUCKET: ${{ vars.R2_BUCKET }}
+  PREFIX: asn
+  AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+  R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
+  AWS_DEFAULT_REGION: auto
+  AWS_ENDPOINT_URL_S3: https://${{ vars.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+  # R2 does not accept the CRC checksum headers newer AWS CLIs send by default.
+  AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+  AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
 
 jobs:
   publish:
     name: Snapshot · validate · publish
     runs-on: ubuntu-latest
-    permissions:
-      contents: write             # create / prune GitHub Releases
     steps:
+      - name: Check configuration
+        run: |
+          set -euo pipefail
+          for v in BUCKET R2_ACCOUNT_ID AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+            [ -n "${!v}" ] || { echo "::error::$v is not configured"; exit 1; }
+          done
+
       - name: Resolve snapshot version
         id: ver
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           version=$(date -u +%Y%m%d)
           tag="asn-$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
+          if aws s3api head-object --bucket "$BUCKET" --key "$PREFIX/$tag/asn-db.json" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "$tag already published; nothing to do"
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
       - uses: actions/checkout@v4
-        if: steps.ver.outputs.exists == 'false'
+        if: steps.ver.outputs.skip == 'false'
         with:
           path: server
 
       - name: Checkout protocol
-        if: steps.ver.outputs.exists == 'false'
+        if: steps.ver.outputs.skip == 'false'
         uses: actions/checkout@v4
         with:
           repository: nettact/protocol
@@ -76,7 +97,7 @@ jobs:
           ssh-key: ${{ secrets.CI_SUBMODULE_SSH_KEY }}
 
       - name: Checkout server-core
-        if: steps.ver.outputs.exists == 'false'
+        if: steps.ver.outputs.skip == 'false'
         uses: actions/checkout@v4
         with:
           repository: nettact/server-core
@@ -84,7 +105,7 @@ jobs:
           ssh-key: ${{ secrets.CI_SUBMODULE_SSH_KEY }}
 
       - uses: actions/setup-go@v5
-        if: steps.ver.outputs.exists == 'false'
+        if: steps.ver.outputs.skip == 'false'
         with:
           go-version: '1.25'
           cache-dependency-path: |
@@ -93,7 +114,7 @@ jobs:
             protocol/go.sum
 
       - name: Assemble workspace
-        if: steps.ver.outputs.exists == 'false'
+        if: steps.ver.outputs.skip == 'false'
         run: |
           set -euo pipefail
           go work init ./protocol ./server-core ./server
@@ -101,47 +122,65 @@ jobs:
           go work edit -replace github.com/nettact/server-core@v0.0.0-00010101000000-000000000000=./server-core
 
       - name: Download and validate snapshot
-        if: steps.ver.outputs.exists == 'false'
+        if: steps.ver.outputs.skip == 'false'
         run: |
           set -euo pipefail
           curl -fsSL --retry 3 --retry-delay 10 -o ip2asn-v4.tsv.gz "$UPSTREAM"
           ( cd server && go run ./ci/asndb \
               -in ../ip2asn-v4.tsv.gz -out ../dist-asn -version "${{ steps.ver.outputs.version }}" )
           ( cd dist-asn && sha256sum -c SHA256SUMS )
+
+      - name: Compare with the published snapshot
+        id: cmp
+        if: steps.ver.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          new=$(jq -r .sha256 dist-asn/asn-db.json)
+          old=""
+          if aws s3 cp "s3://$BUCKET/$PREFIX/asn-db.json" current.json --only-show-errors 2>/dev/null; then
+            old=$(jq -r .sha256 current.json)
+          fi
+          if [ "$new" = "$old" ]; then
+            echo "same=true" >> "$GITHUB_OUTPUT"
+            echo "upstream table unchanged since $(jq -r .version current.json); nothing to publish" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "same=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload snapshot
+        if: steps.ver.outputs.skip == 'false' && steps.cmp.outputs.same == 'false'
+        run: |
+          set -euo pipefail
+          tag="${{ steps.ver.outputs.tag }}"
+          put() { aws s3 cp "$1" "s3://$BUCKET/$PREFIX/$2" --content-type "$3" --only-show-errors; }
+          put dist-asn/ip2asn-v4.tsv.gz "$tag/ip2asn-v4.tsv.gz" application/gzip
+          put dist-asn/SHA256SUMS       "$tag/SHA256SUMS"       'text/plain; charset=utf-8'
+          put dist-asn/asn-db.json      "$tag/asn-db.json"      'application/json; charset=utf-8'
+          # Last: only now does the newest-snapshot pointer name the new files.
+          put dist-asn/asn-db.json      asn-db.json             'application/json; charset=utf-8'
           {
-            echo "## ${{ steps.ver.outputs.tag }}"
+            echo "## $tag"
             echo
             echo '```json'
             cat dist-asn/asn-db.json
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Publish release
-        if: steps.ver.outputs.exists == 'false'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          tag="${{ steps.ver.outputs.tag }}"
-          gh release create "$tag" \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "${{ github.sha }}" \
-            --title "IP-to-ASN table ${{ steps.ver.outputs.version }}" \
-            --notes "Snapshot of iptoasn.com ip2asn-v4 (public domain, PDDL-1.0) for route monitoring. Installed automatically by servers through the download center; not a server release." \
-            --latest=false \
-            dist-asn/ip2asn-v4.tsv.gz dist-asn/asn-db.json dist-asn/SHA256SUMS
-
-      # Runs even when today's snapshot already existed, so a manual dispatch
-      # also tidies up after an interrupted earlier prune.
+      # Runs on every invocation, so a manual dispatch also tidies up after an
+      # interrupted earlier prune.
       - name: Prune old snapshots
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName \
-            --jq '.[].tagName | select(test("^asn-[0-9]{8}$"))' \
+          current=""
+          if aws s3 cp "s3://$BUCKET/$PREFIX/asn-db.json" current.json --only-show-errors 2>/dev/null; then
+            current=$(jq -r .tag current.json)
+          fi
+          aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "$PREFIX/" --delimiter / \
+              --query 'CommonPrefixes[].Prefix' --output text \
+            | tr '\t' '\n' | sed -n "s#^$PREFIX/\\(asn-[0-9]\\{8\\}\\)/\$#\\1#p" \
             | sort -r | tail -n +"$((KEEP + 1))" \
             | while read -r old; do
+                [ "$old" = "$current" ] && continue
                 echo "pruning $old"
-                gh release delete "$old" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+                aws s3 rm "s3://$BUCKET/$PREFIX/$old/" --recursive --only-show-errors
               done

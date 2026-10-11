@@ -7,7 +7,7 @@
 // installs a byte-identical, checksummed file with a stable version name, and a
 // mirror or air-gapped deployment only has to host the same three files.
 //
-// One snapshot is one release tagged asn-YYYYMMDD carrying:
+// One snapshot is one directory named asn-YYYYMMDD carrying:
 //
 //	ip2asn-v4.tsv.gz  the upstream file, byte for byte
 //	asn-db.json       Manifest — version, checksum, size, range count
@@ -62,7 +62,7 @@ var versionPattern = regexp.MustCompile(`^[0-9]{8}$`)
 type Manifest struct {
 	Schema  int    `json:"schema"`
 	Version string `json:"version"` // YYYYMMDD; also the stored asn_db_version
-	Tag     string `json:"tag"`     // release tag holding the snapshot: "asn-" + Version
+	Tag     string `json:"tag"`     // snapshot directory: "asn-" + Version
 	Asset   string `json:"asset"`   // DataAsset
 	SHA256  string `json:"sha256"`  // lowercase hex of the Asset bytes
 	Size    int64  `json:"size"`    // Asset bytes
@@ -71,7 +71,7 @@ type Manifest struct {
 	License string `json:"license"` // upstream data licence (SPDX)
 }
 
-// TagFor is the release tag for a snapshot version.
+// TagFor is the snapshot directory name for a snapshot version.
 func TagFor(version string) string { return "asn-" + version }
 
 // Check validates a manifest's shape before anything is downloaded on its word.

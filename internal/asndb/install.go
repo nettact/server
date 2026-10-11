@@ -60,6 +60,12 @@ func NewInstaller(dir string) *Installer {
 	}
 }
 
+// Dir is the directory the snapshot is installed in.
+func (in *Installer) Dir() string { return in.dir }
+
+// BaseURL is the source snapshots are downloaded from.
+func (in *Installer) BaseURL() string { return in.baseURL }
+
 func (in *Installer) dataPath() string     { return filepath.Join(in.dir, DataAsset) }
 func (in *Installer) manifestPath() string { return filepath.Join(in.dir, ManifestAsset) }
 
@@ -106,6 +112,11 @@ func (in *Installer) Update(ctx context.Context, installed string) (*asnlookup.T
 	if installed != "" && m.Version <= installed {
 		return nil, nil
 	}
+	// A newer snapshot of a byte-identical table is not worth 7 MB: the
+	// publisher already skips unchanged tables, but a mirror may not.
+	if cur, ok := in.installedManifest(); ok && cur.SHA256 == m.SHA256 {
+		return nil, nil
+	}
 	data, err := in.fetchData(ctx, m)
 	if err != nil {
 		return nil, err
@@ -124,6 +135,19 @@ func (in *Installer) Update(ctx context.Context, installed string) (*asnlookup.T
 		return nil, err
 	}
 	return t, nil
+}
+
+// installedManifest reads the manifest of the installed snapshot, if any.
+func (in *Installer) installedManifest() (Manifest, bool) {
+	raw, err := os.ReadFile(in.manifestPath())
+	if err != nil {
+		return Manifest{}, false
+	}
+	var m Manifest
+	if json.Unmarshal(raw, &m) != nil || m.Check() != nil {
+		return Manifest{}, false
+	}
+	return m, true
 }
 
 func (in *Installer) fetchManifest(ctx context.Context) (Manifest, error) {

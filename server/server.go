@@ -830,6 +830,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		Incident:          incidentSvc,
 		IncidentOps:       incidentOps,
 		Routes:            routes,
+		ASNTable:          asnSrc,
 		Notification:      notifSvc,
 		Settings:          settingsSvc,
 		Audit:             auditSvc,

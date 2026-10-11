@@ -1,14 +1,14 @@
 // Command asndb turns a downloaded iptoasn.com ip2asn-v4 snapshot into a
-// publishable release: it validates the file with the same parser and sanity
+// publishable snapshot: it validates the file with the same parser and sanity
 // floor the server applies at install time, then writes the snapshot, its
-// manifest and SHA256SUMS into an output directory for the release step.
+// manifest and SHA256SUMS into an output directory for the upload step.
 //
 //	go run ./ci/asndb -in ip2asn-v4.tsv.gz -out dist -version 20261011
 //
 // Validation runs here, before anything is published, because a deployment
 // that installed a truncated or malformed table would silently lose AS
 // attribution on most hops; the server re-checks on install, but refusing at
-// the source keeps a bad upstream day from ever producing a release.
+// the source keeps a bad upstream day from ever producing a snapshot.
 package main
 
 import (
@@ -30,7 +30,7 @@ const upstreamURL = "https://iptoasn.com/data/ip2asn-v4.tsv.gz"
 
 func main() {
 	in := flag.String("in", "", "downloaded ip2asn-v4.tsv.gz")
-	out := flag.String("out", "dist", "output directory for the release assets")
+	out := flag.String("out", "dist", "output directory for the snapshot files")
 	version := flag.String("version", "", "snapshot version, YYYYMMDD (UTC publication date)")
 	flag.Parse()
 	if *in == "" || *version == "" {
