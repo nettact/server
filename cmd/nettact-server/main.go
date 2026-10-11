@@ -73,6 +73,8 @@ func main() {
 	addr := flag.String("addr", ":12450", "listen address (an explicit value overrides NETTACT_SERVER_ADDR and the web console)")
 	dbPath := flag.String("db", "./nettact.db", "SQLite database path")
 	webuiDir := flag.String("webui-dir", "", "web console download/install directory (default: <db dir>/webui)")
+	asnDB := flag.String("asn-db", "", "iptoasn.com ip2asn-v4 file (.tsv or .tsv.gz) for attributing route-monitor hops to AS numbers; re-read hourly when it changes and never downloaded (overrides -asn-update)")
+	asnUpdate := flag.Bool("asn-update", true, "download the IP-to-ASN table for route monitoring from the NetTact download center into <db dir>/asn and check daily for updates (NETTACT_ASN_BASE_URL overrides the source); false with no -asn-db disables AS attribution")
 	dev := flag.Bool("dev", false, "dev mode: open CORS for the Vite origin, non-Secure cookie")
 	adminUser := flag.String("admin-user", "", "optional; first run only; if omitted an initial password is generated and printed")
 	adminPass := flag.String("admin-pass", "", "optional; first run only; if omitted an initial password is generated and printed")
@@ -125,18 +127,20 @@ func main() {
 	}
 
 	srv, err := server.Start(context.Background(), server.Config{
-		Addr:         resolvedAddr,
-		AddrFromFlag: addrFromFlag,
-		AddrFromEnv:  addrFromEnv,
-		TLSCert:      *tlsCert,
-		TLSKey:       *tlsKey,
-		DBPath:       *dbPath,
-		WebUIDir:     *webuiDir,
-		AdminUser:    *adminUser,
-		AdminPass:    *adminPass,
-		Dev:          *dev,
-		SecureCookie: secure,
-		MaxAgents:    maxAgents,
+		Addr:          resolvedAddr,
+		AddrFromFlag:  addrFromFlag,
+		AddrFromEnv:   addrFromEnv,
+		TLSCert:       *tlsCert,
+		TLSKey:        *tlsKey,
+		DBPath:        *dbPath,
+		WebUIDir:      *webuiDir,
+		ASNDBPath:     *asnDB,
+		ASNAutoUpdate: *asnUpdate,
+		AdminUser:     *adminUser,
+		AdminPass:     *adminPass,
+		Dev:           *dev,
+		SecureCookie:  secure,
+		MaxAgents:     maxAgents,
 		// Retention stays zero: server fills in the standard windows.
 		// Desktop stays nil: standalone Lite exposes no one-time-login endpoint and
 		// keeps the default -addr :12450 bind.

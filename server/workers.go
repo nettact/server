@@ -21,6 +21,7 @@ import (
 	"github.com/nettact/server-core/metrics"
 	"github.com/nettact/server-core/notifypolicy"
 	"github.com/nettact/server-core/registry"
+	"github.com/nettact/server-core/routehist"
 	"github.com/nettact/server-core/settings"
 	"github.com/nettact/server-core/store"
 )
@@ -141,6 +142,8 @@ type deps struct {
 	bus               *eventbus.Bus
 	hub               *agentws.Hub
 	db                *store.DB
+	routes            *routehist.Service
+	asn               *asnSource
 }
 
 func startWorkers(w *workers, d deps) {
@@ -211,6 +214,21 @@ func startWorkers(w *workers, d deps) {
 		// evidence_expired while preserving the incident/alert/evidence summaries.
 		if err := d.incidentops.Retention(ctx); err != nil {
 			log.Printf("incidentops retention: %v", err)
+		}
+	})
+
+	// Route history: per-sweep detail ages out after a week (except the sweeps a
+	// recorded change cites as evidence), while route eras and changes are kept
+	// for good; the same hourly pass picks up a replaced ASN table file or, for
+	// the managed table, runs the daily update check (retried hourly on failure).
+	// Startup-then-hourly for the reason the other retention workers give: a
+	// short-lived process may exit inside the hour, and a plain ticker would
+	// then never prune. Start already loaded the ASN table synchronously from
+	// disk; the startup tick is what fetches it on a fresh install.
+	w.nowThenEvery(time.Hour, func(ctx context.Context) {
+		d.asn.refresh(ctx)
+		if err := d.routes.Retention(ctx); err != nil {
+			log.Printf("route history retention: %v", err)
 		}
 	})
 

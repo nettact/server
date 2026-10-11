@@ -57,6 +57,7 @@ import (
 	"github.com/nettact/server-core/notifypolicy"
 	"github.com/nettact/server-core/opissue"
 	"github.com/nettact/server-core/registry"
+	"github.com/nettact/server-core/routehist"
 	"github.com/nettact/server-core/settings"
 	"github.com/nettact/server-core/site"
 	"github.com/nettact/server-core/sse"
@@ -92,6 +93,20 @@ type Config struct {
 	TLSKey  string
 
 	DBPath string // SQLite database path
+
+	// ASNDBPath is an iptoasn.com ip2asn-v4 file (plain or gzip) the route
+	// monitor uses to attribute traceroute hops to autonomous systems. The file
+	// is re-read hourly when its modification time or size changes and is never
+	// fetched; setting it overrides ASNAutoUpdate.
+	ASNDBPath string
+	// ASNAutoUpdate, with no ASNDBPath, installs the IP→ASN table published
+	// through the download center under ASNDir and checks for a newer snapshot
+	// daily (NETTACT_ASN_BASE_URL overrides the source). Off with no
+	// ASNDBPath means no AS attribution: route history records IP paths only.
+	ASNAutoUpdate bool
+	// ASNDir is where ASNAutoUpdate installs the table. Empty selects
+	// filepath.Dir(DBPath) + "/asn".
+	ASNDir string
 
 	// TSDBDir is the time-series data plane's directory (four embedded TSDB
 	// instances + the dataset manifest). Empty selects
@@ -536,6 +551,20 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	// traceroute reports an Agent decided to run ride the same packets and have to
 	// commit with the rounds they explain.
 	ing := ingest.New(db, bus, metricsStore, faultSvc, baselineSvc, incidentOps)
+	// Route monitoring: scheduled trace sweeps ride the same packets and are
+	// filed into route history inside the ingest transaction, attributed to
+	// autonomous systems through one swappable table the hourly worker refreshes.
+	var asnDir string
+	if cfg.ASNAutoUpdate {
+		asnDir = cfg.ASNDir
+		if asnDir == "" {
+			asnDir = filepath.Join(filepath.Dir(cfg.DBPath), "asn")
+		}
+	}
+	asnSrc := newASNSource(cfg.ASNDBPath, asnDir)
+	asnSrc.load(ctx)
+	ing.ASN = asnSrc.holder
+	routes := routehist.New(db, asnSrc.holder)
 	// Reenrollment (AGENT-006) reuses an agent id whose WAL was wiped; the registry
 	// asks ingest to reset its in-memory sequence watermark (and bump its epoch)
 	// so the first ack after a reinstall reflects the zeroed agents.high_sequence
@@ -717,6 +746,8 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		bus:               bus,
 		hub:               agentHub,
 		db:                db,
+		routes:            routes,
+		asn:               asnSrc,
 	})
 	// Desktop tray summary: incident lifecycle changes kick an immediate refresh.
 	// The tray counts incidents, not signals, so it matches the fault centre.
@@ -798,6 +829,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		NotifyPolicy:      policySvc,
 		Incident:          incidentSvc,
 		IncidentOps:       incidentOps,
+		Routes:            routes,
 		Notification:      notifSvc,
 		Settings:          settingsSvc,
 		Audit:             auditSvc,
